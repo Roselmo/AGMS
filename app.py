@@ -50,7 +50,7 @@ with left:
     if logo_path:
         st.image(logo_path, caption=None, use_column_width="always")
 with mid:
-    st.title("📊 Dashboard AGMS: Ventas, Cartera, RFM y Predicción")
+    st.title("Dashboard AGMS: Reporte Diario de Ventas, Cartera, RFM y Predicción")
 st.markdown("---")
 
 # Si falta plotly: avisar y detener para evitar trazas largas
