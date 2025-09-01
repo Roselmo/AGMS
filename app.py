@@ -404,6 +404,7 @@ with tab1:
 # ---------------------------------------------------------------------------------
 with tab2:
     st.header("Gestión de Cartera")
+
     dfc = df_cartera.copy()
     hoy = datetime.now()
     if 'Fecha de Vencimiento' in dfc.columns:
@@ -411,6 +412,17 @@ with tab2:
     else:
         dfc['Dias_Vencimiento'] = None
 
+    # === Vincular cartera con comercial desde ventas ===
+    if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
+        dfc = dfc.merge(
+            df_ventas[['NÚMERO DE FACTURA', 'COMERCIAL']],
+            on='NÚMERO DE FACTURA',
+            how='left'
+        )
+    else:
+        dfc['COMERCIAL'] = "No disponible"
+
+    # --- Estado ---
     def get_status(row):
         if 'Saldo pendiente' in row and row['Saldo pendiente'] <= 0:
             return 'Pagada'
@@ -420,6 +432,7 @@ with tab2:
             return 'Por Vencer'
 
     dfc['Estado'] = dfc.apply(get_status, axis=1)
+
     saldo_total = dfc[dfc['Estado'] != 'Pagada']['Saldo pendiente'].sum() if 'Saldo pendiente' in dfc.columns else 0
     saldo_vencido = dfc[dfc['Estado'] == 'Vencida']['Saldo pendiente'].sum() if 'Saldo pendiente' in dfc.columns else 0
     saldo_por_vencer = dfc[dfc['Estado'] == 'Por Vencer']['Saldo pendiente'].sum() if 'Saldo pendiente' in dfc.columns else 0
@@ -447,23 +460,16 @@ with tab2:
             return ['background-color: #fff3cd'] * len(row)
         return [''] * len(row)
 
-    cols_show = [c for c in ['Nombre cliente', 'NÚMERO DE FACTURA', 'Fecha de Vencimiento', 'Saldo pendiente', 'Estado', 'Dias_Vencimiento'] if c in dfc_filtrada.columns]
+    # 👉 Ahora incluimos 'COMERCIAL' en la tabla
+    cols_show = [c for c in [
+        'Nombre cliente', 'NÚMERO DE FACTURA', 'Fecha de Vencimiento',
+        'Saldo pendiente', 'Estado', 'Dias_Vencimiento', 'COMERCIAL'
+    ] if c in dfc_filtrada.columns]
+
     st.dataframe(
         dfc_filtrada[cols_show].style.apply(style_venc, axis=1).format({'Saldo pendiente': '${:,.0f}'}) if cols_show else pd.DataFrame(),
         use_container_width=True
     )
-
-    st.markdown("---")
-    if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
-        car = dfc[['Fecha de Vencimiento','Saldo pendiente']].copy()
-        car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
-        labels = ["Al día", "1-30", "31-60", "61-90", "91-180", "181-365", "+365"]
-        bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
-        car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
-        venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
-        st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos"),
-                        use_container_width=True, key="t2_aged")
-
 # ---------------------------------------------------------------------------------
 # TAB 3: ANÁLISIS RFM + Recomendador ML (segmentos & día)
 # ---------------------------------------------------------------------------------
