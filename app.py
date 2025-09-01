@@ -48,7 +48,7 @@ logo_path = next((p for p in LOGO_CANDIDATES if os.path.exists(p)), None)
 left, mid, right = st.columns([1,2,1])
 with left:
     if logo_path:
-        st.image(logo_path, use_column_width=True)
+        st.image(logo_path, use_container_width=True)
 with mid:
     st.title("AGMS - Reporte Diario de Ventas, Cartera, RFM y Predicción")
 st.markdown("---")
