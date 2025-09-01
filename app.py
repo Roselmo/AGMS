@@ -49,7 +49,7 @@ with left:
     if logo_path:
         st.image(logo_path, use_container_width=True)
 with mid:
-    st.title("📊 Dashboard AGMS: Ventas, Cartera, RFM, Predicción y Cotizaciones")
+    st.title("Dashboard AGMS")
 st.markdown("---")
 
 if not PLOTLY_OK:
