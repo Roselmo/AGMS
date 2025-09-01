@@ -1,0 +1,7 @@
+streamlit>=1.33
+pandas>=2.1
+numpy>=1.26
+plotly>=5.22
+scikit-learn>=1.4
+openpyxl>=3.1
+xgboost>=2.0
