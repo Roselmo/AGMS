@@ -1,5 +1,5 @@
 # ==============================================================================
-# APP: Dashboard AGMS – Ventas, Cartera, RFM y Modelos Predictivos
+# APP: Dashboard AGMS – Ventas, Cartera, RFM y Modelos Predictivos + Cotizaciones
 # ==============================================================================
 
 import warnings
@@ -11,7 +11,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# ---- Plotly: import seguro + mensaje claro si falta ----
+# ---- Plotly: import seguro + aviso claro si falta ----
 try:
     import plotly.express as px
     PLOTLY_OK = True
@@ -41,24 +41,21 @@ RANDOM_STATE = 42
 st.set_page_config(page_title="Dashboard de Ventas AGMS", page_icon="📊", layout="wide")
 
 # ---- Portada con logo + título ----
-# intenta cargar el logo en el mismo directorio (usa tu archivo: ag2.jpg)
 LOGO_CANDIDATES = ["ag2.jpg", "logo.png", "AGMS_logo.jpg", "ag_logo.jpg"]
 logo_path = next((p for p in LOGO_CANDIDATES if os.path.exists(p)), None)
 
-left, mid, right = st.columns([1,2,1])
+left, mid, right = st.columns([1, 2, 1])
 with left:
     if logo_path:
         st.image(logo_path, use_container_width=True)
 with mid:
-    st.title("AGMS - Reporte Diario de Ventas, Cartera, RFM y Predicción")
+    st.title("📊 Dashboard AGMS: Ventas, Cartera, RFM, Predicción y Cotizaciones")
 st.markdown("---")
 
-# Si falta plotly: avisar y detener para evitar trazas largas
 if not PLOTLY_OK:
     st.error(
         "No se encontró **plotly** en el entorno.\n\n"
-        "➡️ Agrega `plotly` a tu **requirements.txt** y vuelve a desplegar.\n"
-        "Abajo te dejo un requirements de ejemplo."
+        "➡️ Agrega `plotly` a tu **requirements.txt** y vuelve a desplegar."
     )
     st.stop()
 
@@ -142,10 +139,11 @@ def compute_rfm_table(dfv: pd.DataFrame) -> pd.DataFrame:
 def load_data():
     file_path = 'DB_AGMS.xlsx'
     try:
-        df_ventas = pd.read_excel(file_path, sheet_name='Ventas', header=1)
-        df_medicos = pd.read_excel(file_path, sheet_name='Lista Medicos')
-        df_metadatos = pd.read_excel(file_path, sheet_name='Metadatos')
-        df_cartera = pd.read_excel(file_path, sheet_name='CarteraAgosto')
+        df_ventas     = pd.read_excel(file_path, sheet_name='Ventas', header=1)
+        df_medicos    = pd.read_excel(file_path, sheet_name='Lista Medicos')
+        df_metadatos  = pd.read_excel(file_path, sheet_name='Metadatos')
+        df_cartera    = pd.read_excel(file_path, sheet_name='Cartera')          # <<-- renombrada
+        df_productos  = pd.read_excel(file_path, sheet_name='Productos')        # <<-- nueva hoja
 
         # Ventas
         if 'FECHA VENTA' in df_ventas.columns:
@@ -172,6 +170,18 @@ def load_data():
             df_medicos['TELEFONO'] = df_medicos['TELEFONO'].fillna('').astype(str)
 
         # Cartera
+        # Normalización de columnas típicas
+        rename_map = {
+            'Numero de Factura': 'NÚMERO DE FACTURA',
+            'NUMERO DE FACTURA': 'NÚMERO DE FACTURA',
+            'Num Factura': 'NÚMERO DE FACTURA',
+            'Cliente': 'Nombre cliente',
+            'CLIENTE': 'Nombre cliente',
+            'Fecha Vencimiento': 'Fecha de Vencimiento',
+            'SALDO PENDIENTE': 'Saldo pendiente'
+        }
+        df_cartera.rename(columns={c: rename_map.get(c, c) for c in df_cartera.columns}, inplace=True)
+
         if 'Fecha de Vencimiento' in df_cartera.columns:
             df_cartera.dropna(subset=['Fecha de Vencimiento'], inplace=True)
             df_cartera['Fecha de Vencimiento'] = pd.to_datetime(df_cartera['Fecha de Vencimiento'], errors='coerce')
@@ -179,25 +189,43 @@ def load_data():
             if col in df_cartera.columns:
                 df_cartera[col] = df_cartera[col].fillna(0).apply(limpiar_moneda)
 
-        return df_ventas, df_medicos, df_metadatos, df_cartera
+        # Productos (normalizar nombres a estándar interno)
+        prod_rename = {
+            'LISTA PRODUCTOS': 'Producto_Nombre',
+            'TIPO DE PIEL': 'Tipo_Piel',
+            'CONDICION': 'Condicion',
+            'PROFESIONAL o RETAIL': 'Canal',
+            'Precio Medico': 'Precio_Medico',
+            'Precio Paciente': 'Precio_Paciente',
+            'Marca': 'Marca'
+        }
+        df_productos.rename(columns=prod_rename, inplace=True)
+        # limpieza de strings y precios
+        if 'Producto_Nombre' in df_productos.columns:
+            df_productos['Producto_Nombre'] = df_productos['Producto_Nombre'].astype(str).str.strip()
+        for pc in ['Precio_Medico', 'Precio_Paciente']:
+            if pc in df_productos.columns:
+                df_productos[pc] = df_productos[pc].apply(limpiar_moneda).replace({np.nan:0})
+
+        return df_ventas, df_medicos, df_metadatos, df_cartera, df_productos
     except Exception as e:
         st.error(f"Ocurrió un error al leer el Excel: {e}")
-        return None, None, None, None
+        return None, None, None, None, None
 
-df_ventas, df_medicos, df_metadatos, df_cartera = load_data()
-if df_ventas is None or df_cartera is None:
+df_ventas, df_medicos, df_metadatos, df_cartera, df_productos = load_data()
+if df_ventas is None or df_cartera is None or df_productos is None:
     st.stop()
 
 # ==============================================================================
-# TABS PRINCIPALES (4 pestañas; sin agente)
+# TABS PRINCIPALES (5 pestañas)
 # ==============================================================================
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Análisis de Ventas", "Gestión de Cartera", "Análisis RFM",
-    "Modelo Predictivo de Compradores Potenciales"
+    "Modelo Predictivo de Compradores Potenciales", "Cotizaciones"
 ])
 
 # ---------------------------------------------------------------------------------
-# TAB 1: ANÁLISIS DE VENTAS + Generador de Reporte Consolidado
+# TAB 1: ANÁLISIS DE VENTAS
 # ---------------------------------------------------------------------------------
 with tab1:
     st.header("Análisis General de Ventas")
@@ -315,127 +343,54 @@ with tab1:
             st.plotly_chart(px.imshow(heat, aspect="auto", title="Heatmap (Día x Mes)"),
                             use_container_width=True, key="t1_heatmap")
 
-    # ====== Generador de Reporte Único (EDA + Cartera + RFM) ======
-    def build_agms_report(dfv: pd.DataFrame, dfc: pd.DataFrame) -> str:
-        parts = []
-        # EDA
-        if not dfv.empty:
-            total = float(dfv['Total'].sum()) if 'Total' in dfv.columns else 0.0
-            clientes = dfv['Cliente/Empresa'].nunique() if 'Cliente/Empresa' in dfv.columns else 0
-            ventas_mes = (dfv.groupby('Mes')['Total'].sum().sort_index()
-                          if 'Mes' in dfv.columns else pd.Series(dtype=float))
-            top_prod = (dfv.groupby('Producto_Nombre')['Total'].sum()
-                        .sort_values(ascending=False).head(10)
-                        if 'Producto_Nombre' in dfv.columns else pd.Series(dtype=float))
-            eda_txt = [ "# EDA (Ventas)",
-                        f"- Ventas totales: ${total:,.0f}",
-                        f"- Clientes únicos: {clientes}" ]
-            if len(ventas_mes) > 0:
-                eda_txt += [
-                    f"- Mejor mes: {ventas_mes.idxmax()} (${ventas_mes.max():,.0f})",
-                    f"- Peor mes: {ventas_mes.idxmin()} (${ventas_mes.min():,.0f})",
-                ]
-            if len(top_prod) > 0:
-                top_list = "\n".join([f"    - {k}: ${v:,.0f}" for k, v in top_prod.items()])
-                eda_txt += [f"- Top 10 productos:\n{top_list}"]
-            parts.append("\n".join(eda_txt))
-        # Cartera
-        if not dfc.empty and {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
-            hoy = pd.Timestamp.today()
-            car = dfc.copy()
-            car['Fecha de Vencimiento'] = pd.to_datetime(car['Fecha de Vencimiento'], errors='coerce')
-            car['DIAS_VENCIDOS'] = (hoy.normalize() - car['Fecha de Vencimiento']).dt.days
-            total_pend = float(car['Saldo pendiente'].sum())
-            vencido    = float(car[car['DIAS_VENCIDOS']>0]['Saldo pendiente'].sum())
-            por_vencer = float(car[car['DIAS_VENCIDOS']<=0]['Saldo pendiente'].sum())
-            labels = ["Al día","1-30","31-60","61-90","91-180","181-365","+365"]
-            bins   = [-np.inf,0,30,60,90,180,365,np.inf]
-            car['Rango'] = pd.cut(car['DIAS_VENCIDOS'], bins=bins, labels=labels, ordered=True)
-            bucket = car.groupby('Rango')['Saldo pendiente'].sum().to_dict()
-            bucket_txt = "\n".join([f"    - {k}: ${v:,.0f}" for k,v in bucket.items()])
-            parts.append("\n".join([
-                "# Cartera",
-                f"- Cartera total pendiente: ${total_pend:,.0f}",
-                f"- Vencido: ${vencido:,.0f}",
-                f"- Por vencer: ${por_vencer:,.0f}",
-                f"- Antigüedad de saldos:\n{bucket_txt}"
-            ]))
-        # RFM
-        rfm_tab = compute_rfm_table(dfv)
-        if not rfm_tab.empty:
-            dist = rfm_tab['Segmento'].value_counts().to_dict()
-            dist_txt = "\n".join([f"    - {k}: {v}" for k,v in dist.items()])
-            parts.append("\n".join([
-                "# RFM",
-                f"- Recencia media: {rfm_tab['Recencia'].mean():.1f} días",
-                f"- Frecuencia media: {rfm_tab['Frecuencia'].mean():.2f}",
-                f"- Monetario medio: ${rfm_tab['Monetario'].mean():,.0f}",
-                f"- Distribución por segmento:\n{dist_txt}"
-            ]))
-        if not parts:
-            return "# Reporte AGMS\n(No hay datos suficientes para generar el reporte)."
-        return "# Reporte AGMS Consolidado (EDA + Cartera + RFM)\n\n" + "\n".join(parts)
-
-    st.markdown("---")
-    st.subheader("📄 Reporte consolidado")
-    colr1, colr2 = st.columns([1,1])
-    with colr1:
-        if st.button("Generar/Actualizar reporte (EDA + Cartera + RFM)", key="btn_make_report"):
-            report_text = build_agms_report(dfv, df_cartera.copy())
-            st.session_state["AGMS_REPORT"] = report_text
-            st.success("Reporte generado y guardado en memoria (AGMS_REPORT).")
-    with colr2:
-        if "AGMS_REPORT" in st.session_state:
-            st.download_button(
-                "Descargar reporte (TXT)",
-                data=st.session_state["AGMS_REPORT"].encode("utf-8"),
-                file_name=f"Reporte_AGMS_{pd.Timestamp.today().date()}.txt",
-                mime="text/plain",
-                key="dl_report_txt"
-            )
-    if "AGMS_REPORT" in st.session_state:
-        with st.expander("👁️ Vista previa del reporte"):
-            st.code(st.session_state["AGMS_REPORT"], language="markdown")
-    else:
-        st.info("Aún no hay reporte. Presiona el botón para generarlo.")
-
 # ---------------------------------------------------------------------------------
-# TAB 2: GESTIÓN DE CARTERA
+# TAB 2: GESTIÓN DE CARTERA (lee Cartera y une COMERCIAL por factura)
 # ---------------------------------------------------------------------------------
 with tab2:
     st.header("Gestión de Cartera")
 
     dfc = df_cartera.copy()
+
+    # Asegurar tipos
+    if 'Fecha de Vencimiento' in dfc.columns:
+        dfc['Fecha de Vencimiento'] = pd.to_datetime(dfc['Fecha de Vencimiento'], errors='coerce')
+
+    for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
+        if col in dfc.columns:
+            dfc[col] = dfc[col].fillna(0).apply(limpiar_moneda)
+
+    # Unir COMERCIAL desde ventas por número de factura (normalizado)
+    if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
+        dfc['NÚMERO DE FACTURA'] = dfc['NÚMERO DE FACTURA'].astype(str).str.strip()
+        dfv_fact = df_ventas[['NÚMERO DE FACTURA', 'COMERCIAL']].dropna(subset=['NÚMERO DE FACTURA']).copy()
+        dfv_fact['NÚMERO DE FACTURA'] = dfv_fact['NÚMERO DE FACTURA'].astype(str).str.strip()
+        dfc = dfc.merge(dfv_fact.drop_duplicates(), on='NÚMERO DE FACTURA', how='left')
+    else:
+        dfc['COMERCIAL'] = "No disponible"
+
+    # Días de vencimiento y estado
     hoy = datetime.now()
     if 'Fecha de Vencimiento' in dfc.columns:
         dfc['Dias_Vencimiento'] = (dfc['Fecha de Vencimiento'] - hoy).dt.days
     else:
-        dfc['Dias_Vencimiento'] = None
+        dfc['Dias_Vencimiento'] = np.nan
 
-    # === Vincular cartera con comercial desde ventas ===
-    if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
-        dfc = dfc.merge(
-            df_ventas[['NÚMERO DE FACTURA', 'COMERCIAL']],
-            on='NÚMERO DE FACTURA',
-            how='left'
-        )
-    else:
-        dfc['COMERCIAL'] = "No disponible"
-
-    # --- Estado ---
     def get_status(row):
-        if 'Saldo pendiente' in row and row['Saldo pendiente'] <= 0:
+        sp = row.get('Saldo pendiente', np.nan)
+        dv = row.get('Dias_Vencimiento', np.nan)
+        if pd.notna(sp) and sp <= 0:
             return 'Pagada'
-        elif row['Dias_Vencimiento'] is not None and row['Dias_Vencimiento'] < 0:
+        if pd.notna(dv) and dv < 0 and pd.notna(sp) and sp > 0:
             return 'Vencida'
-        else:
+        if pd.notna(sp) and sp > 0:
             return 'Por Vencer'
+        return 'Sin información'
 
     dfc['Estado'] = dfc.apply(get_status, axis=1)
 
-    saldo_total = dfc[dfc['Estado'] != 'Pagada']['Saldo pendiente'].sum() if 'Saldo pendiente' in dfc.columns else 0
-    saldo_vencido = dfc[dfc['Estado'] == 'Vencida']['Saldo pendiente'].sum() if 'Saldo pendiente' in dfc.columns else 0
-    saldo_por_vencer = dfc[dfc['Estado'] == 'Por Vencer']['Saldo pendiente'].sum() if 'Saldo pendiente' in dfc.columns else 0
+    saldo_total = float(dfc.loc[dfc['Estado'] != 'Pagada', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+    saldo_vencido = float(dfc.loc[dfc['Estado'] == 'Vencida', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+    saldo_por_vencer = float(dfc.loc[dfc['Estado'] == 'Por Vencer', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Saldo Total Pendiente", f"${saldo_total:,.0f}")
@@ -443,24 +398,30 @@ with tab2:
     c3.metric("Total por Vencer", f"${saldo_por_vencer:,.0f}")
     st.markdown("---")
 
-    filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada'], key="t2_estado")
+    # Filtros
+    filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada', 'Sin información'], key="t2_estado")
     lista_clientes_cartera = sorted(dfc['Nombre cliente'].dropna().unique()) if 'Nombre cliente' in dfc.columns else []
     filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera, key="t2_cliente")
+    lista_comerciales = sorted(dfc['COMERCIAL'].fillna('No disponible').unique()) if 'COMERCIAL' in dfc.columns else []
+    filtro_comercial = st.multiselect("Filtrar por Comercial:", options=lista_comerciales, key="t2_comercial")
 
     dfc_filtrada = dfc.copy()
     if filtro_estado != 'Todas':
         dfc_filtrada = dfc_filtrada[dfc_filtrada['Estado'] == filtro_estado]
     if filtro_cliente and 'Nombre cliente' in dfc_filtrada.columns:
         dfc_filtrada = dfc_filtrada[dfc_filtrada['Nombre cliente'].isin(filtro_cliente)]
+    if filtro_comercial and 'COMERCIAL' in dfc_filtrada.columns:
+        dfc_filtrada = dfc_filtrada[dfc_filtrada['COMERCIAL'].fillna('No disponible').isin(filtro_comercial)]
 
+    # Estilos
     def style_venc(row):
         if row['Estado'] == 'Vencida':
             return ['background-color: #ffcccc'] * len(row)
-        elif isinstance(row['Dias_Vencimiento'], (int, float)) and 0 <= row['Dias_Vencimiento'] <= 7:
+        dv = row.get('Dias_Vencimiento', np.nan)
+        if pd.notna(dv) and 0 <= dv <= 7:
             return ['background-color: #fff3cd'] * len(row)
         return [''] * len(row)
 
-    # 👉 Ahora incluimos 'COMERCIAL' en la tabla
     cols_show = [c for c in [
         'Nombre cliente', 'NÚMERO DE FACTURA', 'Fecha de Vencimiento',
         'Saldo pendiente', 'Estado', 'Dias_Vencimiento', 'COMERCIAL'
@@ -470,201 +431,50 @@ with tab2:
         dfc_filtrada[cols_show].style.apply(style_venc, axis=1).format({'Saldo pendiente': '${:,.0f}'}) if cols_show else pd.DataFrame(),
         use_container_width=True
     )
+
+    st.markdown("---")
+    if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
+        car = dfc[['Fecha de Vencimiento','Saldo pendiente']].copy()
+        car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
+        labels = ["Al día", "1-30", "31-60", "61-90", "91-180", "181-365", "+365"]
+        bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
+        car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
+        venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
+        st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos (Cartera)"),
+                        use_container_width=True, key="t2_aged")
+
+    if 'COMERCIAL' in dfc.columns and 'Saldo pendiente' in dfc.columns:
+        por_com = dfc.groupby('COMERCIAL', as_index=False)['Saldo pendiente'].sum().sort_values('Saldo pendiente', ascending=False)
+        st.plotly_chart(px.bar(por_com, x='COMERCIAL', y='Saldo pendiente', title="Saldo pendiente por Comercial"),
+                        use_container_width=True, key="t2_by_salesrep")
+
 # ---------------------------------------------------------------------------------
-# TAB 3: ANÁLISIS RFM + Recomendador ML (segmentos & día)
+# TAB 3: ANÁLISIS RFM (vista básica + utilidades)
 # ---------------------------------------------------------------------------------
 with tab3:
-    st.header("Análisis RFM + Recomendador ML")
-
-    colp1, colp2, colp3, colp4 = st.columns(4)
-    dias_recencia = colp1.slider("Ventana 'comprador reciente' (días)", 7, 120, 30, key="t3_rec")
-    top_k_sugerencias = colp2.slider("Nº sugerencias a mostrar", 5, 30, 10, key="t3_top")
-    usar_top_productos = colp3.checkbox("Usar señales de productos (Top 10)", value=True, key="t3_topprod")
-    excluir_recencia = colp4.checkbox("Excluir 'Recencia' como feature", value=True, key="t3_exrec")
-
-    dias_op = ["(Todos)","Lunes","Martes","Miércoles","Jueves","Viernes","Sábado","Domingo"]
-    dia_reporte = st.selectbox("Día deseado del reporte", dias_op, index=0, key="t3_dia")
+    st.header("Análisis RFM")
 
     cols_nec = {'Cliente/Empresa', 'FECHA VENTA', 'Total'}
     if not cols_nec.issubset(df_ventas.columns):
-        st.warning(f"Faltan columnas para RFM/ML: {cols_nec}.")
+        st.warning(f"Faltan columnas para RFM: {cols_nec}.")
     else:
-        ejecutar = st.button("🚀 Ejecutar RFM + Entrenar y Comparar Modelos", key="t3_run")
-        if ejecutar:
-            with st.spinner("Procesando..."):
-                ventas = df_ventas.copy()
-                ventas['Cliente/Empresa'] = ventas['Cliente/Empresa'].astype(str).str.strip().str.upper()
-                ventas['FECHA VENTA'] = pd.to_datetime(ventas['FECHA VENTA'], errors="coerce")
-                ventas = ventas.dropna(subset=['FECHA VENTA'])
-                ref_date = ventas['FECHA VENTA'].max()
-                tiene_factura = 'NÚMERO DE FACTURA' in ventas.columns
+        ventas = df_ventas.copy()
+        ventas['Cliente/Empresa'] = ventas['Cliente/Empresa'].astype(str).str.strip().str.upper()
+        ventas['FECHA VENTA'] = pd.to_datetime(ventas['FECHA VENTA'], errors="coerce")
+        ventas = ventas.dropna(subset=['FECHA VENTA'])
 
-                # RFM
-                rfm = ventas.groupby('Cliente/Empresa').agg(
-                    Recencia=('FECHA VENTA', lambda s: (ref_date - s.max()).days),
-                    Frecuencia=('NÚMERO DE FACTURA', 'nunique') if tiene_factura else ('FECHA VENTA','count'),
-                    Monetario=('Total', 'sum')
-                ).reset_index()
-                rfm['R_Score'] = _safe_qcut_score(rfm['Recencia'], ascending=True, labels=[5,4,3,2,1])
-                rfm['F_Score'] = _safe_qcut_score(rfm['Frecuencia'], ascending=False, labels=[1,2,3,4,5])
-                rfm['M_Score'] = _safe_qcut_score(rfm['Monetario'],  ascending=False, labels=[1,2,3,4,5])
-                rfm['Segmento'] = rfm.apply(rfm_segment, axis=1).fillna("Sin Segmento")
+        rfm = compute_rfm_table(ventas)
+        if rfm.empty:
+            st.info("No fue posible calcular RFM.")
+        else:
+            st.subheader("Distribución por segmento")
+            dist = rfm['Segmento'].value_counts().reset_index()
+            dist.columns = ['Segmento', 'Clientes']
+            st.dataframe(dist, use_container_width=True)
 
-                st.caption("Distribución de segmentos RFM")
-                st.dataframe(rfm['Segmento'].value_counts(dropna=False).rename_axis('Segmento').to_frame('Clientes'),
-                             use_container_width=True)
-
-                # Features comportamiento
-                ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek
-                ventas['Hora'] = ventas['FECHA VENTA'].dt.hour
-                feats_dia  = ventas.groupby(['Cliente/Empresa','DiaSemana']).size().unstack(fill_value=0)
-                feats_dia.columns  = [f"dw_{int(c)}" for c in feats_dia.columns]
-                feats_hora = ventas.groupby(['Cliente/Empresa','Hora']).size().unstack(fill_value=0)
-                feats_hora.columns = [f"h_{int(c)}" for c in feats_hora.columns]
-                feats_dia  = row_normalize(feats_dia)
-                feats_hora = row_normalize(feats_hora)
-
-                feats_prod = None
-                if usar_top_productos and 'Producto_Nombre' in ventas.columns:
-                    top10_prod = (ventas.groupby('Producto_Nombre')['Total'].sum()
-                                  .sort_values(ascending=False).head(10).index.tolist())
-                    v_prod = ventas[ventas['Producto_Nombre'].isin(top10_prod)].copy()
-                    feats_prod = (v_prod.groupby(['Cliente/Empresa','Producto_Nombre']).size().unstack(fill_value=0))
-                    feats_prod = row_normalize(feats_prod)
-
-                df_feat = rfm.merge(feats_dia, on='Cliente/Empresa', how='left') \
-                             .merge(feats_hora, on='Cliente/Empresa', how='left')
-                if feats_prod is not None:
-                    df_feat = df_feat.merge(feats_prod, on='Cliente/Empresa', how='left')
-                for c in df_feat.select_dtypes(include=[np.number]).columns:
-                    df_feat[c] = df_feat[c].fillna(0)
-
-                # Target comprador reciente
-                recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
-                df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
-
-                # Filtro de segmentos multi
-                segmentos_all = sorted(df_feat['Segmento'].dropna().unique().tolist())
-                seg_sel = st.multiselect("Filtrar por Segmento RFM (multi)", options=segmentos_all, default=segmentos_all, key="t3_seg")
-                if seg_sel:
-                    df_feat = df_feat[df_feat['Segmento'].isin(seg_sel)]
-
-                feature_cols = ['Frecuencia','Monetario'] + [c for c in df_feat.columns if c.startswith('dw_') or c.startswith('h_')]
-                if feats_prod is not None:
-                    feature_cols += [c for c in df_feat.columns if c in feats_prod.columns]
-                if not excluir_recencia:
-                    feature_cols = ['Recencia'] + feature_cols
-                X = df_feat[feature_cols]
-                y = df_feat['comprador_reciente']
-
-                if y.nunique() < 2:
-                    st.warning("La variable objetivo tiene una sola clase. Ajusta la ventana/segmentos.")
-                    st.stop()
-
-                modelos = {
-                    "LogisticRegression": LogisticRegression(max_iter=800, C=0.3, penalty="l2", class_weight='balanced'),
-                    "RandomForest": RandomForestClassifier(
-                        n_estimators=250, max_depth=6, min_samples_leaf=10,
-                        random_state=RANDOM_STATE, class_weight='balanced', n_jobs=-1
-                    ),
-                }
-                if HAS_XGB:
-                    modelos["XGBoost"] = XGBClassifier(
-                        n_estimators=350, learning_rate=0.06, max_depth=4,
-                        min_child_weight=5, subsample=0.9, colsample_bytree=0.9,
-                        reg_lambda=1.2, random_state=RANDOM_STATE, eval_metric='logloss', tree_method="hist"
-                    )
-                else:
-                    modelos["GradientBoosting"] = GradientBoostingClassifier(
-                        n_estimators=300, learning_rate=0.06, max_depth=3, random_state=RANDOM_STATE
-                    )
-
-                n_splits = int(np.clip(y.value_counts().min(), 2, 5))
-                cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-                resultados = []
-                for nombre, modelo in modelos.items():
-                    cv_res = cross_validate(modelo, X, y, cv=cv,
-                                            scoring={'accuracy':'accuracy','f1':'f1','roc_auc':'roc_auc'},
-                                            n_jobs=-1)
-                    resultados.append({
-                        "Modelo": nombre,
-                        "Accuracy": f"{cv_res['test_accuracy'].mean():.3f} ± {cv_res['test_accuracy'].std():.3f}",
-                        "F1":       f"{cv_res['test_f1'].mean():.3f} ± {cv_res['test_f1'].std():.3f}",
-                        "AUC":      f"{cv_res['test_roc_auc'].mean():.3f} ± {cv_res['test_roc_auc'].std():.3f}",
-                        "_auc_mean": cv_res['test_roc_auc'].mean(),
-                        "_f1_mean":  cv_res['test_f1'].mean()
-                    })
-
-                df_res = pd.DataFrame(resultados).sort_values(by=["_auc_mean","_f1_mean"], ascending=False)
-                mejor_modelo_nombre = df_res.iloc[0]["Modelo"]
-                st.subheader("Comparación de Modelos (CV)")
-                st.dataframe(df_res.drop(columns=["_auc_mean","_f1_mean"]), use_container_width=True)
-                st.success(f"🏆 Mejor modelo: **{mejor_modelo_nombre}**")
-
-                best_model = modelos[mejor_modelo_nombre]
-                best_model.fit(X, y)
-                if hasattr(best_model, "predict_proba"):
-                    probs_full = best_model.predict_proba(X)[:,1]
-                elif hasattr(best_model, "decision_function"):
-                    s_full = best_model.decision_function(X)
-                    probs_full = (s_full - s_full.min()) / (s_full.max() - s_full.min() + 1e-9)
-                else:
-                    probs_full = best_model.predict(X)
-
-                df_feat['Prob_Compra'] = probs_full
-
-                # Candidatos (no recientes)
-                candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
-
-                # Mejor día histórico (dw_)
-                dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
-                def mejor_dia(row):
-                    if not dia_cols: return None
-                    sub = row[dia_cols]
-                    if (sub.max() == 0) or sub.isna().all(): return None
-                    idx = int(sub.idxmax().split("_")[1])
-                    mapa_dw = {0:"Lunes",1:"Martes",2:"Miércoles",3:"Jueves",4:"Viernes",5:"Sábado",6:"Domingo"}
-                    return mapa_dw.get(idx)
-                candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
-
-                # Producto sugerido (más comprado históricamente)
-                if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
-                    top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
-                                        .sum().reset_index())
-                    idx = top_prod_cliente.groupby('Cliente/Empresa')['Total'].idxmax()
-                    top_prod_cliente = top_prod_cliente.loc[idx][['Cliente/Empresa', 'Producto_Nombre']] \
-                                                       .rename(columns={'Producto_Nombre':'Producto_Sugerido'})
-                    candidatos = candidatos.merge(top_prod_cliente, on='Cliente/Empresa', how='left')
-                else:
-                    candidatos['Producto_Sugerido'] = None
-
-                # Filtro día
-                if dia_reporte != "(Todos)":
-                    candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
-
-                if candidatos.empty:
-                    st.info("No hay candidatos con los filtros seleccionados.")
-                else:
-                    topN = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[
-                        ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
-                    ].copy()
-                    asignaciones = (["Camila", "Andrea"] * ((len(topN)//2)+1))[:len(topN)]
-                    topN['Asignado_a'] = asignaciones
-
-                    st.subheader("🎯 Top clientes potenciales a contactar")
-                    st.dataframe(
-                        topN.rename(columns={'Cliente/Empresa':'Cliente','Prob_Compra':'Probabilidad_Compra'}) \
-                            .style.format({'Probabilidad_Compra':'{:.1%}'}),
-                        use_container_width=True
-                    )
-
-                    st.download_button(
-                        "⬇️ Descargar sugerencias (CSV)",
-                        data=topN.to_csv(index=False).encode('utf-8'),
-                        file_name=f"sugerencias_rfm_ml_{pd.Timestamp.today().date()}.csv",
-                        mime="text/csv",
-                        key="t3_dl"
-                    )
+            st.subheader("Top clientes por Monetario")
+            top_m = rfm.sort_values('Monetario', ascending=False).head(15)
+            st.dataframe(top_m[['Cliente/Empresa','Recencia','Frecuencia','Monetario','Segmento']], use_container_width=True)
 
 # ---------------------------------------------------------------------------------
 # TAB 4: MODELO PREDICTIVO DE COMPRADORES POTENCIALES (Balanced Acc / MCC / F1-macro)
@@ -859,10 +669,10 @@ with tab4:
                     probas = best_estimator.predict(X).astype(float)
 
                 DS = X.copy()
-                DS['Cliente/Empresa'] = df_ventas['Cliente/Empresa'].drop_duplicates().values[:len(DS)]
+                # cuidado: asegurar que la alineación con clientes sea correcta si se necesita
+                DS['Cliente/Empresa'] = DS.index.astype(str)
                 DS['Probabilidad_Compra'] = probas
-                candidatos = DS[['Cliente/Empresa','Probabilidad_Compra']].copy()
-                top10 = candidatos.nlargest(10, 'Probabilidad_Compra')
+                top10 = DS[['Cliente/Empresa','Probabilidad_Compra']].nlargest(10, 'Probabilidad_Compra')
 
                 st.subheader("🎯 Top 10 clientes potenciales (mejor modelo optimizado)")
                 st.dataframe(
@@ -878,3 +688,148 @@ with tab4:
                     mime="text/csv",
                     key="t4_dl"
                 )
+
+# ---------------------------------------------------------------------------------
+# TAB 5: COTIZACIONES (usa hoja Productos; maneja "No aplica")
+# ---------------------------------------------------------------------------------
+with tab5:
+    st.header("🧾 Cotizaciones")
+
+    if df_productos is None or df_productos.empty or 'Producto_Nombre' not in df_productos.columns:
+        st.warning("No se encontró la hoja 'Productos' con el formato esperado.")
+        st.stop()
+
+    # Catálogo base
+    catalog = df_productos.copy()
+    # Normalizaciones básicas
+    for pc in ['Precio_Medico', 'Precio_Paciente']:
+        if pc in catalog.columns:
+            # Si hay textos "No aplica" en Excel, ya no son numéricos; los marcamos como NaN y guardamos bandera
+            catalog[pc] = pd.to_numeric(catalog[pc], errors='coerce')
+
+    # Guardar info de "No aplica" (True si no existe precio numérico)
+    catalog['NA_Medico']   = catalog['Precio_Medico'].isna()
+    catalog['NA_Paciente'] = catalog['Precio_Paciente'].isna()
+
+    # Relleno 0 para cálculo (solo para operaciones; mostramos "No aplica" en UI)
+    catalog['Precio_Medico']   = catalog['Precio_Medico'].fillna(0.0)
+    catalog['Precio_Paciente'] = catalog['Precio_Paciente'].fillna(0.0)
+
+    opciones = sorted(catalog['Producto_Nombre'].unique().tolist())
+    sel = st.multiselect("Agrega productos a la cotización (escribe iniciales para buscar)", options=opciones, key="cot_sel")
+
+    # Persistencia en sesión
+    if "cot_items" not in st.session_state:
+        st.session_state["cot_items"] = {}  # { producto: {"qty": int, "price_type": "Medico"/"Paciente"} }
+
+    # Sincronizar selección con sesión (añadir nuevos y eliminar no seleccionados)
+    # Añadir nuevos
+    for p in sel:
+        if p not in st.session_state["cot_items"]:
+            # precio disponible por defecto: si Médico existe, usar Médico; si no, Paciente
+            row = catalog.loc[catalog['Producto_Nombre'] == p].iloc[0]
+            default_ptype = "Medico" if not row['NA_Medico'] else "Paciente"
+            st.session_state["cot_items"][p] = {"qty": 1, "price_type": default_ptype}
+    # Eliminar deseleccionados
+    for p in list(st.session_state["cot_items"].keys()):
+        if p not in sel:
+            del st.session_state["cot_items"][p]
+
+    if not sel:
+        st.info("Selecciona uno o más productos para armar la cotización.")
+    else:
+        st.markdown("#### Detalle de la cotización")
+        total = 0.0
+        rows = []
+
+        # Encabezado visual
+        hdr = st.columns([4, 2, 3, 3, 3])
+        hdr[0].markdown("**Producto**")
+        hdr[1].markdown("**Cantidad**")
+        hdr[2].markdown("**Tipo de precio**")
+        hdr[3].markdown("**Precio unitario**")
+        hdr[4].markdown("**Subtotal**")
+
+        for p in sel:
+            row = catalog.loc[catalog['Producto_Nombre'] == p].iloc[0]
+            na_med = bool(row['NA_Medico'])
+            na_pac = bool(row['NA_Paciente'])
+
+            # Opciones válidas de precio según "No aplica"
+            if na_med and na_pac:
+                # Caso extremo: no hay precio disponible
+                valid_opts = []
+            elif na_med and not na_pac:
+                valid_opts = ["Paciente"]
+            elif not na_med and na_pac:
+                valid_opts = ["Medico"]
+            else:
+                valid_opts = ["Medico", "Paciente"]
+
+            c0, c1, c2, c3, c4 = st.columns([4, 2, 3, 3, 3])
+            c0.write(p)
+
+            # Cantidad (persistente)
+            qty_key = f"qty_{p}"
+            qty_val = st.session_state["cot_items"][p]["qty"]
+            qty = c1.number_input(" ", min_value=1, step=1, value=qty_val, key=qty_key)
+            st.session_state["cot_items"][p]["qty"] = qty
+
+            # Select tipo precio dinámico según 'valid_opts'
+            ptype_key = f"ptype_{p}"
+            current_ptype = st.session_state["cot_items"][p]["price_type"]
+            # Si la opción actual ya no es válida (por cambios), corregir
+            if current_ptype not in valid_opts and valid_opts:
+                current_ptype = valid_opts[0]
+                st.session_state["cot_items"][p]["price_type"] = current_ptype
+
+            if valid_opts:
+                chosen_ptype = c2.selectbox(" ", options=valid_opts, index=valid_opts.index(current_ptype), key=ptype_key)
+                st.session_state["cot_items"][p]["price_type"] = chosen_ptype
+            else:
+                c2.warning("Sin precio disponible")
+                st.session_state["cot_items"][p]["price_type"] = None
+
+            # Precio unitario según tipo
+            punit = 0.0
+            if st.session_state["cot_items"][p]["price_type"] == "Medico":
+                punit = float(row['Precio_Medico'])
+            elif st.session_state["cot_items"][p]["price_type"] == "Paciente":
+                punit = float(row['Precio_Paciente'])
+
+            c3.metric(label=" ", value=f"${punit:,.0f}")
+
+            subtotal = punit * qty
+            total += subtotal
+            c4.metric(label=" ", value=f"${subtotal:,.0f}")
+
+            rows.append({
+                "Producto": p,
+                "Cantidad": qty,
+                "TipoPrecio": st.session_state["cot_items"][p]["price_type"] or "N/A",
+                "PrecioUnitario": punit,
+                "Subtotal": subtotal
+            })
+
+        # Botón para calcular y mostrar total
+        st.markdown("---")
+        if st.button("Calcular total", key="cot_total_btn"):
+            st.success(f"**Total cotización:** ${total:,.0f}")
+
+        # Descargar CSV
+        if rows:
+            df_cot = pd.DataFrame(rows)
+            st.download_button(
+                "⬇️ Descargar cotización (CSV)",
+                data=df_cot.to_csv(index=False).encode("utf-8"),
+                file_name=f"cotizacion_{pd.Timestamp.today().date()}.csv",
+                mime="text/csv",
+                key="cot_csv"
+            )
+
+        # Vista en tabla
+        if rows:
+            st.dataframe(
+                pd.DataFrame(rows).style.format({"PrecioUnitario":"${:,.0f}","Subtotal":"${:,.0f}"}),
+                use_container_width=True
+            )
