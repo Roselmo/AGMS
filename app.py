@@ -1,18 +1,22 @@
 # ==============================================================================
-# APP: Dashboard AGMS – Ventas, Cartera, RFM, Predicción y Agente de Análisis
-# ==============================================================================
-# Requisitos sugeridos (requirements.txt):
-# streamlit, pandas, numpy, plotly, scikit-learn, openai (opcional), xgboost (opcional)
+# APP: Dashboard AGMS – Ventas, Cartera, RFM y Modelos Predictivos
 # ==============================================================================
 
 import warnings
 warnings.filterwarnings("ignore")
 
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 from datetime import datetime
+
+# ---- Plotly: import seguro + mensaje claro si falta ----
+try:
+    import plotly.express as px
+    PLOTLY_OK = True
+except Exception:
+    PLOTLY_OK = False
 
 from sklearn.model_selection import StratifiedKFold, cross_validate, RandomizedSearchCV
 from sklearn.metrics import make_scorer, balanced_accuracy_score, matthews_corrcoef, f1_score
@@ -35,8 +39,28 @@ RANDOM_STATE = 42
 # CONFIGURACIÓN
 # ==============================================================================
 st.set_page_config(page_title="Dashboard de Ventas AGMS", page_icon="📊", layout="wide")
-st.title("📊 Dashboard AGMS: Ventas, Cartera, RFM, Predicción y Agente")
+
+# ---- Portada con logo + título ----
+# intenta cargar el logo en el mismo directorio (usa tu archivo: ag2.jpg)
+LOGO_CANDIDATES = ["ag2.jpg", "logo.png", "AGMS_logo.jpg", "ag_logo.jpg"]
+logo_path = next((p for p in LOGO_CANDIDATES if os.path.exists(p)), None)
+
+left, mid, right = st.columns([1,2,1])
+with left:
+    if logo_path:
+        st.image(logo_path, caption=None, use_column_width="always")
+with mid:
+    st.title("📊 Dashboard AGMS: Ventas, Cartera, RFM y Predicción")
 st.markdown("---")
+
+# Si falta plotly: avisar y detener para evitar trazas largas
+if not PLOTLY_OK:
+    st.error(
+        "No se encontró **plotly** en el entorno.\n\n"
+        "➡️ Agrega `plotly` a tu **requirements.txt** y vuelve a desplegar.\n"
+        "Abajo te dejo un requirements de ejemplo."
+    )
+    st.stop()
 
 # ==============================================================================
 # UTILIDADES
@@ -165,11 +189,11 @@ if df_ventas is None or df_cartera is None:
     st.stop()
 
 # ==============================================================================
-# TABS PRINCIPALES
+# TABS PRINCIPALES (4 pestañas; sin agente)
 # ==============================================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "Análisis de Ventas", "Gestión de Cartera", "Análisis RFM",
-    "Modelo Predictivo de Compradores Potenciales", "Agente de Análisis"
+    "Modelo Predictivo de Compradores Potenciales"
 ])
 
 # ---------------------------------------------------------------------------------
@@ -353,7 +377,7 @@ with tab1:
         return "# Reporte AGMS Consolidado (EDA + Cartera + RFM)\n\n" + "\n".join(parts)
 
     st.markdown("---")
-    st.subheader("📄 Reporte consolidado para el Agente")
+    st.subheader("📄 Reporte consolidado")
     colr1, colr2 = st.columns([1,1])
     with colr1:
         if st.button("Generar/Actualizar reporte (EDA + Cartera + RFM)", key="btn_make_report"):
@@ -370,7 +394,7 @@ with tab1:
                 key="dl_report_txt"
             )
     if "AGMS_REPORT" in st.session_state:
-        with st.expander("👁️ Vista previa del reporte (lo que leerá el agente)"):
+        with st.expander("👁️ Vista previa del reporte"):
             st.code(st.session_state["AGMS_REPORT"], language="markdown")
     else:
         st.info("Aún no hay reporte. Presiona el botón para generarlo.")
@@ -848,6 +872,3 @@ with tab4:
                     mime="text/csv",
                     key="t4_dl"
                 )
-
-
-
