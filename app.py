@@ -21,7 +21,6 @@ except Exception:
 # ML
 from sklearn.model_selection import StratifiedKFold, cross_validate, RandomizedSearchCV
 from sklearn.metrics import make_scorer, balanced_accuracy_score, matthews_corrcoef, f1_score
-from sklearn.metrics import roc_auc_score
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
@@ -49,7 +48,7 @@ logo_path = next((p for p in LOGO_CANDIDATES if os.path.exists(p)), None)
 left, mid, right = st.columns([1, 2, 1])
 with left:
     if logo_path:
-        st.image(logo_path, use_container_width=True)   # ✅ sin use_column_width deprecado
+        st.image(logo_path, use_container_width=True)
 with mid:
     st.title("📊 Dashboard AGMS: Ventas, Cartera, RFM, Predicción y Cotizaciones")
 st.markdown("---")
@@ -63,6 +62,8 @@ if not PLOTLY_OK:
 # ==============================================================================
 def row_normalize(df_counts: pd.DataFrame) -> pd.DataFrame:
     """Normaliza cada fila para convertir conteos a proporciones."""
+    if df_counts.empty:
+        return df_counts
     sums = df_counts.sum(axis=1).replace(0, 1)
     return df_counts.div(sums, axis=0)
 
@@ -132,6 +133,76 @@ def compute_rfm_table(dfv: pd.DataFrame) -> pd.DataFrame:
     rfm['Segmento'] = rfm.apply(rfm_segment, axis=1).fillna("Sin Segmento")
     return rfm
 
+# ===== Utilidades de Productos (precios) =====
+def _to_num_price(series_like):
+    """
+    Convierte precios tipo '$1.234.567,89' o 'No aplica' a float.
+    Devuelve NaN cuando no aplica o no puede convertirse.
+    """
+    s = pd.Series(series_like).astype(str)
+    s = (s.str.replace('$', '', regex=False)
+           .str.replace('.', '', regex=False)   # miles
+           .str.replace(',', '.', regex=False)  # decimales
+           .str.strip())
+    s = s.mask(s.str.contains(r'no\s*aplica|n/?a', case=False, regex=True), np.nan)
+    return pd.to_numeric(s, errors='coerce')
+
+def ensure_product_numeric_cols(df_prod: pd.DataFrame) -> pd.DataFrame:
+    """
+    Garantiza que existan:
+      - _Precio_Medico_num (float)
+      - _Precio_Paciente_num (float)
+      - NA_Medico (bool) y NA_Paciente (bool)
+    aunque cambien los nombres originales de columnas.
+    """
+    if df_prod is None or df_prod.empty:
+        return df_prod
+
+    # mapa de nombres (sin espacios extra)
+    name_map = {c.strip(): c for c in df_prod.columns}
+
+    def _find_col(candidates):
+        # intento exacto
+        for cand in candidates:
+            if cand in name_map:
+                return name_map[cand]
+        # intento normalizado (lower + underscores)
+        for k in list(name_map.keys()):
+            kn = k.lower().replace(' ', '_')
+            if kn in [c.lower().replace(' ', '_') for c in candidates]:
+                return name_map[k]
+        return None
+
+    col_pm = _find_col(['Precio_Medico', 'Precio Medico', 'PRECIO MEDICO', 'Precio_Médico', 'Precio Médico'])
+    col_pp = _find_col(['Precio_Paciente', 'Precio Paciente', 'PRECIO PACIENTE'])
+
+    # numéricos auxiliares
+    if '_Precio_Medico_num' not in df_prod.columns:
+        df_prod['_Precio_Medico_num'] = _to_num_price(df_prod[col_pm]) if col_pm else np.nan
+    if '_Precio_Paciente_num' not in df_prod.columns:
+        df_prod['_Precio_Paciente_num'] = _to_num_price(df_prod[col_pp]) if col_pp else np.nan
+
+    # banderas NA_* (No aplica o sin precio)
+    if 'NA_Medico' not in df_prod.columns:
+        if col_pm:
+            df_prod['NA_Medico'] = (
+                df_prod[col_pm].astype(str).str.contains(r'no\s*aplica|n/?a', case=False, regex=True)
+                | df_prod['_Precio_Medico_num'].isna()
+            )
+        else:
+            df_prod['NA_Medico'] = True
+
+    if 'NA_Paciente' not in df_prod.columns:
+        if col_pp:
+            df_prod['NA_Paciente'] = (
+                df_prod[col_pp].astype(str).str.contains(r'no\s*aplica|n/?a', case=False, regex=True)
+                | df_prod['_Precio_Paciente_num'].isna()
+            )
+        else:
+            df_prod['NA_Paciente'] = True
+
+    return df_prod
+
 # ==============================================================================
 # CARGA DE DATOS
 # ==============================================================================
@@ -142,8 +213,8 @@ def load_data():
         df_ventas     = pd.read_excel(file_path, sheet_name='Ventas', header=1)
         df_medicos    = pd.read_excel(file_path, sheet_name='Lista Medicos')
         df_metadatos  = pd.read_excel(file_path, sheet_name='Metadatos')
-        df_cartera    = pd.read_excel(file_path, sheet_name='Cartera')      # <<-- renombrada
-        df_productos  = pd.read_excel(file_path, sheet_name='Productos')    # <<-- nueva hoja
+        df_cartera    = pd.read_excel(file_path, sheet_name='Cartera')      # renombrada
+        df_productos  = pd.read_excel(file_path, sheet_name='Productos')    # nueva hoja
 
         # Ventas
         if 'FECHA VENTA' in df_ventas.columns:
@@ -198,14 +269,12 @@ def load_data():
             'Precio Paciente': 'Precio_Paciente',
             'Marca': 'Marca'
         }
-        df_productos.rename(columns=prod_rename, inplace=True)
+        df_productos.rename(columns={c: prod_rename.get(c, c) for c in df_productos.columns}, inplace=True)
         if 'Producto_Nombre' in df_productos.columns:
             df_productos['Producto_Nombre'] = df_productos['Producto_Nombre'].astype(str).str.strip()
-        # Mantener "No aplica" como texto para la UI; también generamos columnas numéricas auxiliares
-        for pc in ['Precio_Medico', 'Precio_Paciente']:
-            if pc in df_productos.columns:
-                # guardamos una numérica auxiliar (para cálculos)
-                df_productos[f"_{pc}_num"] = pd.to_numeric(df_productos[pc], errors='coerce')
+
+        # Asegurar columnas numéricas auxiliares y banderas NA_* (robusto)
+        df_productos = ensure_product_numeric_cols(df_productos)
 
         return df_ventas, df_medicos, df_metadatos, df_cartera, df_productos
     except Exception as e:
@@ -351,7 +420,6 @@ with tab2:
 
     dfc = df_cartera.copy()
 
-    # Tipos
     if 'Fecha de Vencimiento' in dfc.columns:
         dfc['Fecha de Vencimiento'] = pd.to_datetime(dfc['Fecha de Vencimiento'], errors='coerce')
 
@@ -368,7 +436,6 @@ with tab2:
     else:
         dfc['COMERCIAL'] = "No disponible"
 
-    # Días y estado
     hoy = datetime.now()
     if 'Fecha de Vencimiento' in dfc.columns:
         dfc['Dias_Vencimiento'] = (dfc['Fecha de Vencimiento'] - hoy).dt.days
@@ -643,7 +710,6 @@ with tab3:
                         key="t3_dl"
                     )
 
-
 # ---------------------------------------------------------------------------------
 # TAB 4: MODELO PREDICTIVO DE COMPRADORES POTENCIALES (Optimización con CV)
 # ---------------------------------------------------------------------------------
@@ -857,7 +923,7 @@ with tab4:
                 )
 
 # ---------------------------------------------------------------------------------
-# TAB 5: COTIZACIONES (usa hoja Productos; maneja "No aplica")
+# TAB 5: COTIZACIONES (usa hoja Productos; maneja "No aplica" y evita KeyError)
 # ---------------------------------------------------------------------------------
 with tab5:
     st.header("🧾 Cotizaciones")
@@ -866,19 +932,25 @@ with tab5:
         st.warning("No se encontró la hoja 'Productos' con el formato esperado.")
         st.stop()
 
-    catalog = df_productos.copy()
+    # Copia + asegurar columnas requeridas (robusto a variaciones en el Excel)
+    catalog = ensure_product_numeric_cols(df_productos.copy())
 
-    # Bandera de "No aplica": True si no hay número en el precio
-    catalog['NA_Medico']   = catalog['_Precio_Medico_num'].isna()
-    catalog['NA_Paciente'] = catalog['_Precio_Paciente_num'].isna()
-
-    # Relleno 0 (solo para cálculo; la UI respeta 'No aplica')
+    # Relleno 0 SOLO para cálculo; la UI respeta 'No aplica'
     catalog['_Precio_Medico_num']   = catalog['_Precio_Medico_num'].fillna(0.0)
     catalog['_Precio_Paciente_num'] = catalog['_Precio_Paciente_num'].fillna(0.0)
 
+    # Si por alguna razón no se crearon banderas, créalas ahora
+    if 'NA_Medico' not in catalog.columns:
+        catalog['NA_Medico'] = catalog['_Precio_Medico_num'].isna() | (catalog['_Precio_Medico_num'] <= 0)
+    if 'NA_Paciente' not in catalog.columns:
+        catalog['NA_Paciente'] = catalog['_Precio_Paciente_num'].isna() | (catalog['_Precio_Paciente_num'] <= 0)
+
     # Selector de productos (autocompletable)
-    opciones = sorted(catalog['Producto_Nombre'].unique().tolist())
-    sel = st.multiselect("Agrega productos a la cotización (escribe iniciales para buscar)", options=opciones, key="cot_sel")
+    opciones = sorted(catalog['Producto_Nombre'].astype(str).unique().tolist())
+    sel = st.multiselect(
+        "Agrega productos a la cotización (escribe iniciales para buscar)",
+        options=opciones, key="cot_sel"
+    )
 
     # Estado de cotización en sesión
     if "cot_items" not in st.session_state:
@@ -887,9 +959,19 @@ with tab5:
     # Sincronizar selección con sesión
     for p in sel:
         if p not in st.session_state["cot_items"]:
-            row = catalog.loc[catalog['Producto_Nombre'] == p].iloc[0]
-            default_ptype = "Medico" if not row['NA_Medico'] else ("Paciente" if not row['NA_Paciente'] else None)
+            row_p = catalog.loc[catalog['Producto_Nombre'] == p].iloc[0]
+            # default según disponibilidad
+            if not bool(row_p['NA_Medico']) and bool(row_p['NA_Paciente']):
+                default_ptype = "Medico"
+            elif bool(row_p['NA_Medico']) and not bool(row_p['NA_Paciente']):
+                default_ptype = "Paciente"
+            elif not bool(row_p['NA_Medico']) and not bool(row_p['NA_Paciente']):
+                default_ptype = "Medico"
+            else:
+                default_ptype = None
             st.session_state["cot_items"][p] = {"qty": 1, "price_type": default_ptype}
+
+    # Eliminar del estado los productos des-seleccionados
     for p in list(st.session_state["cot_items"].keys()):
         if p not in sel:
             del st.session_state["cot_items"][p]
@@ -915,11 +997,11 @@ with tab5:
             na_pac = bool(row['NA_Paciente'])
 
             if na_med and na_pac:
-                valid_opts = []            # sin precio para nadie
+                valid_opts = []
             elif na_med and not na_pac:
-                valid_opts = ["Paciente"]  # solo Paciente
+                valid_opts = ["Paciente"]
             elif not na_med and na_pac:
-                valid_opts = ["Medico"]    # solo Médico
+                valid_opts = ["Medico"]
             else:
                 valid_opts = ["Medico", "Paciente"]
 
@@ -940,19 +1022,20 @@ with tab5:
 
             if valid_opts:
                 ptype_key = f"ptype_{p}"
-                chosen_ptype = c2.selectbox(" ", options=valid_opts, index=valid_opts.index(current_ptype),
+                chosen_ptype = c2.selectbox(" ", options=valid_opts,
+                                            index=valid_opts.index(current_ptype) if current_ptype in valid_opts else 0,
                                             key=ptype_key)
                 st.session_state["cot_items"][p]["price_type"] = chosen_ptype
             else:
                 c2.warning("Sin precio disponible")
                 st.session_state["cot_items"][p]["price_type"] = None
 
-            # precio unitario numérico para cálculo
+            # precio unitario numérico para cálculo (auxiliares robustas)
             punit = 0.0
             if st.session_state["cot_items"][p]["price_type"] == "Medico":
-                punit = float(row['_Precio_Medico_num'])
+                punit = float(row.get('_Precio_Medico_num', 0.0))
             elif st.session_state["cot_items"][p]["price_type"] == "Paciente":
-                punit = float(row['_Precio_Paciente_num'])
+                punit = float(row.get('_Precio_Paciente_num', 0.0))
 
             c3.metric(label=" ", value=f"${punit:,.0f}")
 
