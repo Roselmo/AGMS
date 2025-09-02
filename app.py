@@ -448,12 +448,11 @@ with tab2:
                         use_container_width=True, key="t2_by_salesrep")
 
 # ---------------------------------------------------------------------------------
-# TAB 3: ANÁLISIS RFM + Recomendador ML (RESTABLECIDO y MEJORADO)
+# TAB 3: ANÁLISIS RFM + Recomendador ML (segmentos & día)
 # ---------------------------------------------------------------------------------
 with tab3:
     st.header("Análisis RFM + Recomendador ML")
 
-    # Controles de ejecución
     colp1, colp2, colp3, colp4 = st.columns(4)
     dias_recencia = colp1.slider("Ventana 'comprador reciente' (días)", 7, 120, 30, key="t3_rec")
     top_k_sugerencias = colp2.slider("Nº sugerencias a mostrar", 5, 30, 10, key="t3_top")
@@ -467,9 +466,9 @@ with tab3:
     if not cols_nec.issubset(df_ventas.columns):
         st.warning(f"Faltan columnas para RFM/ML: {cols_nec}.")
     else:
-        if st.button("🚀 Ejecutar RFM + Entrenar y Comparar Modelos", key="t3_run"):
-            with st.spinner("Calculando RFM, armando features y comparando modelos..."):
-                # --- Datos base ---
+        ejecutar = st.button("🚀 Ejecutar RFM + Entrenar y Comparar Modelos", key="t3_run")
+        if ejecutar:
+            with st.spinner("Procesando..."):
                 ventas = df_ventas.copy()
                 ventas['Cliente/Empresa'] = ventas['Cliente/Empresa'].astype(str).str.strip().str.upper()
                 ventas['FECHA VENTA'] = pd.to_datetime(ventas['FECHA VENTA'], errors="coerce")
@@ -477,7 +476,7 @@ with tab3:
                 ref_date = ventas['FECHA VENTA'].max()
                 tiene_factura = 'NÚMERO DE FACTURA' in ventas.columns
 
-                # === RFM ---
+                # RFM
                 rfm = ventas.groupby('Cliente/Empresa').agg(
                     Recencia=('FECHA VENTA', lambda s: (ref_date - s.max()).days),
                     Frecuencia=('NÚMERO DE FACTURA', 'nunique') if tiene_factura else ('FECHA VENTA','count'),
@@ -492,10 +491,9 @@ with tab3:
                 st.dataframe(rfm['Segmento'].value_counts(dropna=False).rename_axis('Segmento').to_frame('Clientes'),
                              use_container_width=True)
 
-                # === FEATURES comportamiento (día y hora) ===
-                ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek   # 0..6
-                ventas['Hora'] = ventas['FECHA VENTA'].dt.hour             # 0..23
-
+                # Features comportamiento
+                ventas['DiaSemana'] = ventas['FECHA VENTA'].dt.dayofweek
+                ventas['Hora'] = ventas['FECHA VENTA'].dt.hour
                 feats_dia  = ventas.groupby(['Cliente/Empresa','DiaSemana']).size().unstack(fill_value=0)
                 feats_dia.columns  = [f"dw_{int(c)}" for c in feats_dia.columns]
                 feats_hora = ventas.groupby(['Cliente/Empresa','Hora']).size().unstack(fill_value=0)
@@ -503,7 +501,6 @@ with tab3:
                 feats_dia  = row_normalize(feats_dia)
                 feats_hora = row_normalize(feats_hora)
 
-                # === FEATURES productos top 10 (opcional) ===
                 feats_prod = None
                 if usar_top_productos and 'Producto_Nombre' in ventas.columns:
                     top10_prod = (ventas.groupby('Producto_Nombre')['Total'].sum()
@@ -512,34 +509,28 @@ with tab3:
                     feats_prod = (v_prod.groupby(['Cliente/Empresa','Producto_Nombre']).size().unstack(fill_value=0))
                     feats_prod = row_normalize(feats_prod)
 
-                # === Ensamble de dataset de features ===
                 df_feat = rfm.merge(feats_dia, on='Cliente/Empresa', how='left') \
                              .merge(feats_hora, on='Cliente/Empresa', how='left')
                 if feats_prod is not None:
                     df_feat = df_feat.merge(feats_prod, on='Cliente/Empresa', how='left')
-
                 for c in df_feat.select_dtypes(include=[np.number]).columns:
                     df_feat[c] = df_feat[c].fillna(0)
 
-                # === Target: comprador reciente (dentro de N días) ===
+                # Target comprador reciente
                 recientes = ventas[ventas['FECHA VENTA'] >= ref_date - pd.Timedelta(days=dias_recencia)]['Cliente/Empresa'].unique()
                 df_feat['comprador_reciente'] = df_feat['Cliente/Empresa'].isin(recientes).astype(int)
 
-                # === Filtro de segmentos (multi) ===
+                # Filtro de segmentos multi
                 segmentos_all = sorted(df_feat['Segmento'].dropna().unique().tolist())
-                seg_sel = st.multiselect("Filtrar por Segmento RFM (multi)", options=segmentos_all,
-                                         default=segmentos_all, key="t3_seg")
+                seg_sel = st.multiselect("Filtrar por Segmento RFM (multi)", options=segmentos_all, default=segmentos_all, key="t3_seg")
                 if seg_sel:
                     df_feat = df_feat[df_feat['Segmento'].isin(seg_sel)]
 
-                # === Selección de features ===
-                feature_cols = ['Frecuencia','Monetario'] + \
-                               [c for c in df_feat.columns if c.startswith('dw_') or c.startswith('h_')]
+                feature_cols = ['Frecuencia','Monetario'] + [c for c in df_feat.columns if c.startswith('dw_') or c.startswith('h_')]
                 if feats_prod is not None:
                     feature_cols += [c for c in df_feat.columns if c in feats_prod.columns]
                 if not excluir_recencia:
                     feature_cols = ['Recencia'] + feature_cols
-
                 X = df_feat[feature_cols]
                 y = df_feat['comprador_reciente']
 
@@ -547,12 +538,10 @@ with tab3:
                     st.warning("La variable objetivo tiene una sola clase. Ajusta la ventana/segmentos.")
                     st.stop()
 
-                # === Modelos a comparar ===
                 modelos = {
-                    "LogisticRegression": LogisticRegression(max_iter=800, C=0.3, penalty="l2",
-                                                             class_weight='balanced', n_jobs=None),
+                    "LogisticRegression": LogisticRegression(max_iter=800, C=0.3, penalty="l2", class_weight='balanced'),
                     "RandomForest": RandomForestClassifier(
-                        n_estimators=300, max_depth=6, min_samples_leaf=10,
+                        n_estimators=250, max_depth=6, min_samples_leaf=10,
                         random_state=RANDOM_STATE, class_weight='balanced', n_jobs=-1
                     ),
                 }
@@ -567,22 +556,20 @@ with tab3:
                         n_estimators=300, learning_rate=0.06, max_depth=3, random_state=RANDOM_STATE
                     )
 
-                # === Validación cruzada ===
                 n_splits = int(np.clip(y.value_counts().min(), 2, 5))
                 cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-
                 resultados = []
                 for nombre, modelo in modelos.items():
-                    scores = cross_validate(modelo, X, y, cv=cv,
+                    cv_res = cross_validate(modelo, X, y, cv=cv,
                                             scoring={'accuracy':'accuracy','f1':'f1','roc_auc':'roc_auc'},
                                             n_jobs=-1)
                     resultados.append({
                         "Modelo": nombre,
-                        "Accuracy": f"{scores['test_accuracy'].mean():.3f} ± {scores['test_accuracy'].std():.3f}",
-                        "F1":       f"{scores['test_f1'].mean():.3f} ± {scores['test_f1'].std():.3f}",
-                        "AUC":      f"{scores['test_roc_auc'].mean():.3f} ± {scores['test_roc_auc'].std():.3f}",
-                        "_auc_mean": scores['test_roc_auc'].mean(),
-                        "_f1_mean":  scores['test_f1'].mean()
+                        "Accuracy": f"{cv_res['test_accuracy'].mean():.3f} ± {cv_res['test_accuracy'].std():.3f}",
+                        "F1":       f"{cv_res['test_f1'].mean():.3f} ± {cv_res['test_f1'].std():.3f}",
+                        "AUC":      f"{cv_res['test_roc_auc'].mean():.3f} ± {cv_res['test_roc_auc'].std():.3f}",
+                        "_auc_mean": cv_res['test_roc_auc'].mean(),
+                        "_f1_mean":  cv_res['test_f1'].mean()
                     })
 
                 df_res = pd.DataFrame(resultados).sort_values(by=["_auc_mean","_f1_mean"], ascending=False)
@@ -591,7 +578,6 @@ with tab3:
                 st.dataframe(df_res.drop(columns=["_auc_mean","_f1_mean"]), use_container_width=True)
                 st.success(f"🏆 Mejor modelo: **{mejor_modelo_nombre}**")
 
-                # === Entrenamiento final y scoring ===
                 best_model = modelos[mejor_modelo_nombre]
                 best_model.fit(X, y)
                 if hasattr(best_model, "predict_proba"):
@@ -604,10 +590,10 @@ with tab3:
 
                 df_feat['Prob_Compra'] = probs_full
 
-                # === Candidatos: no recientes ===
+                # Candidatos (no recientes)
                 candidatos = df_feat[df_feat['comprador_reciente'] == 0].copy()
 
-                # Mejor día histórico (dw_*)
+                # Mejor día histórico (dw_)
                 dia_cols = [c for c in candidatos.columns if c.startswith("dw_")]
                 def mejor_dia(row):
                     if not dia_cols: return None
@@ -618,7 +604,7 @@ with tab3:
                     return mapa_dw.get(idx)
                 candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
 
-                # Producto sugerido: más gastado históricamente
+                # Producto sugerido (más comprado históricamente)
                 if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
                     top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
                                         .sum().reset_index())
@@ -629,31 +615,34 @@ with tab3:
                 else:
                     candidatos['Producto_Sugerido'] = None
 
-                # Filtro por día deseado
+                # Filtro día
                 if dia_reporte != "(Todos)":
                     candidatos = candidatos[candidatos['Dia_Contacto'] == dia_reporte]
 
                 if candidatos.empty:
                     st.info("No hay candidatos con los filtros seleccionados.")
                 else:
-                    # Armado de tabla final
-                    cols_show = ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
-                    tabla = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[cols_show].copy()
-                    asignaciones = (["Camila", "Andrea"] * ((len(tabla)//2)+1))[:len(tabla)]
-                    tabla['Asignado_a'] = asignaciones
+                    topN = candidatos.nlargest(top_k_sugerencias, 'Prob_Compra')[
+                        ['Cliente/Empresa','Prob_Compra','Producto_Sugerido','Dia_Contacto','Segmento']
+                    ].copy()
+                    asignaciones = (["Camila", "Andrea"] * ((len(topN)//2)+1))[:len(topN)]
+                    topN['Asignado_a'] = asignaciones
+
                     st.subheader("🎯 Top clientes potenciales a contactar")
                     st.dataframe(
-                        tabla.rename(columns={'Cliente/Empresa':'Cliente','Prob_Compra':'Probabilidad_Compra'}) \
-                             .style.format({'Probabilidad_Compra':'{:.1%}'}),
+                        topN.rename(columns={'Cliente/Empresa':'Cliente','Prob_Compra':'Probabilidad_Compra'}) \
+                            .style.format({'Probabilidad_Compra':'{:.1%}'}),
                         use_container_width=True
                     )
+
                     st.download_button(
                         "⬇️ Descargar sugerencias (CSV)",
-                        data=tabla.to_csv(index=False).encode('utf-8'),
+                        data=topN.to_csv(index=False).encode('utf-8'),
                         file_name=f"sugerencias_rfm_ml_{pd.Timestamp.today().date()}.csv",
                         mime="text/csv",
                         key="t3_dl"
                     )
+
 
 # ---------------------------------------------------------------------------------
 # TAB 4: MODELO PREDICTIVO DE COMPRADORES POTENCIALES (Optimización con CV)
