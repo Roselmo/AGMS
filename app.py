@@ -294,38 +294,51 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ---------------------------------------------------------------------------------
-# TAB 1: ANÁLISIS DE VENTAS (robusto y sin KeyError)
+# TAB 1: ANÁLISIS DE VENTAS (usa la última fecha disponible en los datos)
 # ---------------------------------------------------------------------------------
 with tab1:
     st.header("Análisis General de Ventas")
 
-    # Base de ventas con fecha válida
+    # Base robusta
     if 'FECHA VENTA' in df_ventas.columns:
         dv = df_ventas.copy()
         dv['FECHA VENTA'] = pd.to_datetime(dv['FECHA VENTA'], errors='coerce')
         dv = dv.dropna(subset=['FECHA VENTA'])
+        # Asegurar 'Total' como numérico
+        if 'Total' in dv.columns:
+            dv['Total'] = pd.to_numeric(dv['Total'], errors='coerce').fillna(0.0)
     else:
         st.warning("No se encuentra la columna 'FECHA VENTA' en ventas.")
         dv = df_ventas.copy()
 
+    # Fechas de referencia (desde el inicio hasta la ÚLTIMA FECHA EN LOS DATOS)
+    if not dv.empty:
+        min_date = dv['FECHA VENTA'].min().normalize()
+        max_date = dv['FECHA VENTA'].max().normalize()
+    else:
+        min_date = pd.Timestamp(2024,1,1)
+        max_date = pd.Timestamp.today().normalize()
+
     # =========================
     # KPIs superiores
     # =========================
+    # Ventas desde 2024-01-01 hasta LA ÚLTIMA FECHA DISPONIBLE
     inicio_2024 = pd.Timestamp(2024, 1, 1)
-    hoy = pd.Timestamp.today().normalize()
-    mask_2024 = (dv['FECHA VENTA'] >= inicio_2024) & (dv['FECHA VENTA'] <= hoy)
-    total_2024_hoy = float(dv.loc[mask_2024, 'Total'].sum()) if 'Total' in dv.columns else 0.0
+    mask_2024 = (dv['FECHA VENTA'] >= inicio_2024) & (dv['FECHA VENTA'] <= max_date)
+    total_2024_a_ult = float(dv.loc[mask_2024, 'Total'].sum()) if 'Total' in dv.columns else 0.0
 
-    total_ventas = float(dv['Total'].sum()) if 'Total' in dv.columns else 0.0
-    total_transacciones = len(dv)
-    clientes_unicos = dv['Cliente/Empresa'].nunique() if 'Cliente/Empresa' in dv.columns else 0
-    ticket_prom = total_ventas / total_transacciones if total_transacciones else 0.0
+    total_hist = float(dv.loc[(dv['FECHA VENTA'] >= dv['FECHA VENTA'].min()) &
+                              (dv['FECHA VENTA'] <= max_date), 'Total'].sum()) if 'Total' in dv.columns else 0.0
+    total_transacciones = int(dv.loc[dv['FECHA VENTA'] <= max_date].shape[0])
+    clientes_unicos = int(dv.loc[dv['FECHA VENTA'] <= max_date, 'Cliente/Empresa'].nunique()) if 'Cliente/Empresa' in dv.columns else 0
+    ticket_prom = (total_hist / total_transacciones) if total_transacciones else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ventas 2024 → Hoy", f"${total_2024_hoy:,.0f}")
-    c2.metric("Ventas Totales (histórico)", f"${total_ventas:,.0f}")
+    c1.metric("Ventas 2024 → última fecha (datos)", f"${total_2024_a_ult:,.0f}")
+    c2.metric("Ventas Totales (histórico → última fecha)", f"${total_hist:,.0f}")
     c3.metric("Clientes Únicos", f"{clientes_unicos:,}")
     c4.metric("Ticket Promedio", f"${ticket_prom:,.0f}")
+    st.caption(f"Rango de datos: {min_date.date()} → {max_date.date()}")
     st.markdown("---")
 
     # =========================
@@ -337,8 +350,10 @@ with tab1:
             "Periodo", options=["Año", "Mes", "Semana", "Día"], index=0, horizontal=True, key="t1_kpi_periodo"
         )
 
+        dv_clip = dv[(dv['FECHA VENTA'] >= min_date) & (dv['FECHA VENTA'] <= max_date)].copy()
+
         if granular_op == "Año":
-            tmp = dv.copy()
+            tmp = dv_clip.copy()
             tmp['Año'] = tmp['FECHA VENTA'].dt.year
             serie = tmp.groupby('Año', as_index=False)['Total'].sum()
             sel = colp[1].selectbox("Selecciona año", options=sorted(serie['Año'].unique().tolist()), key="t1_kpi_year")
@@ -346,7 +361,7 @@ with tab1:
             colp[2].metric("Valor seleccionado", f"${valor:,.0f}")
 
         elif granular_op == "Mes":
-            tmp = dv.copy()
+            tmp = dv_clip.copy()
             tmp['Periodo'] = tmp['FECHA VENTA'].dt.to_period("M").astype(str)  # YYYY-MM
             serie = tmp.groupby('Periodo', as_index=False)['Total'].sum()
             sel = colp[1].selectbox("Selecciona mes (YYYY-MM)", options=sorted(serie['Periodo'].tolist()), key="t1_kpi_month")
@@ -354,7 +369,7 @@ with tab1:
             colp[2].metric("Valor seleccionado", f"${valor:,.0f}")
 
         elif granular_op == "Semana":
-            tmp = dv.copy()
+            tmp = dv_clip.copy()
             tmp['Periodo'] = tmp['FECHA VENTA'].dt.to_period("W").astype(str)  # YYYY-Wxx
             serie = tmp.groupby('Periodo', as_index=False)['Total'].sum()
             sel = colp[1].selectbox("Selecciona semana (YYYY-Wxx)", options=sorted(serie['Periodo'].tolist()), key="t1_kpi_week")
@@ -362,10 +377,10 @@ with tab1:
             colp[2].metric("Valor seleccionado", f"${valor:,.0f}")
 
         else:  # Día
-            tmp = dv.copy()
+            tmp = dv_clip.copy()
             tmp['Fecha'] = tmp['FECHA VENTA'].dt.date
             serie = tmp.groupby('Fecha', as_index=False)['Total'].sum()
-            default_day = serie['Fecha'].max() if not serie.empty else hoy.date()
+            default_day = serie['Fecha'].max() if not serie.empty else max_date.date()
             sel = colp[1].date_input("Selecciona día", value=default_day, key="t1_kpi_day")
             valor = float(serie.loc[serie['Fecha']==pd.to_datetime(sel).date(), 'Total'].sum()) if not serie.empty else 0.0
             colp[2].metric("Valor seleccionado", f"${valor:,.0f}")
@@ -376,20 +391,20 @@ with tab1:
     # Evolución temporal (dinámica por ventana y agrupación)
     # =========================
     st.subheader("Evolución temporal")
+
     cA, cB = st.columns([2, 1])
-
-    # Ventana de fechas
-    min_date = dv['FECHA VENTA'].min() if 'FECHA VENTA' in dv.columns else pd.Timestamp(2024,1,1)
-    max_date = dv['FECHA VENTA'].max() if 'FECHA VENTA' in dv.columns else hoy
-    date_range = cA.date_input("Ventana de fechas", value=[min_date.date(), max_date.date()], key="t1_range")
-
-    # Agrupación solo para esta gráfica
+    # Ventana por defecto: TODO el rango en datos (min → max)
+    date_range = cA.date_input(
+        "Ventana de fechas",
+        value=[min_date.date(), max_date.date()],
+        key="t1_range"
+    )
     agrup = cB.radio("Agrupar por", options=["Día","Semana","Mes","Año"], index=2, horizontal=True, key="t1_agg")
 
-    # Filtrado por rango
+    # Filtrado por rango elegido (incluye extremo derecho)
     if isinstance(date_range, (list, tuple)) and len(date_range)==2:
         f_ini = pd.to_datetime(date_range[0])
-        f_fin = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1)  # inclusive
+        f_fin = pd.to_datetime(date_range[1]) + pd.Timedelta(days=1)  # inclusivo
         dvg = dv[(dv['FECHA VENTA']>=f_ini) & (dv['FECHA VENTA']<f_fin)].copy()
     else:
         dvg = dv.copy()
@@ -422,17 +437,18 @@ with tab1:
 
     # =========================
     # Subpestañas: Resumen, Productos, Clientes, Mapa de calor
-    # (Series y Pareto han sido eliminadas)
     # =========================
     tab_r1, tab_r3, tab_r4, tab_r6 = st.tabs(
         ["Resumen", "Productos", "Clientes", "Mapa de calor"]
     )
 
-    # -------- Resumen (Top por Producto: gráfico + tabla) --------
+    # -------- Resumen (Top por Producto) --------
     with tab_r1:
         if "Producto_Nombre" in dv.columns:
             top_n_prod = st.selectbox("Top-N Productos", options=[5,10,15,20,30], index=1, key="t1_top_prod")
-            prod = dv.groupby("Producto_Nombre", as_index=False)["Total"].sum().sort_values("Total", ascending=False)
+            prod = (dv.loc[dv['FECHA VENTA']<=max_date]
+                      .groupby("Producto_Nombre", as_index=False)["Total"].sum()
+                      .sort_values("Total", ascending=False))
             top_prod = prod.head(top_n_prod)
             cA1, cB1 = st.columns(2)
             with cA1:
@@ -442,14 +458,13 @@ with tab1:
             with cB1:
                 st.dataframe(top_prod, use_container_width=True)
 
-    # -------- Productos (dinámico usando hoja Productos) --------
+    # -------- Productos (dinámico con hoja Productos) --------
     with tab_r3:
         st.caption("Explora el catálogo desde la hoja **Productos**")
         if df_productos is None or df_productos.empty or 'Producto_Nombre' not in df_productos.columns:
             st.warning("No se encontró la hoja 'Productos' con el formato esperado.")
         else:
             cat = df_productos.copy()
-            # Filtros
             colf1, colf2, colf3 = st.columns(3)
             marcas  = sorted(cat['Marca'].dropna().unique().tolist()) if 'Marca' in cat.columns else []
             canales = sorted(cat['Canal'].dropna().unique().tolist()) if 'Canal' in cat.columns else []
@@ -465,7 +480,6 @@ with tab1:
             if tpiel_sel and 'Tipo_Piel' in cat.columns:
                 cat = cat[cat['Tipo_Piel'].isin(tpiel_sel)]
 
-            # Distribución por categoría elegible
             vars_cat = [c for c in ['Marca','Canal','Tipo_Piel','Condicion'] if c in cat.columns]
             colg1, colg2 = st.columns(2)
             if vars_cat:
@@ -476,8 +490,8 @@ with tab1:
                 figc.update_layout(yaxis={'categoryorder':'total ascending'})
                 colg1.plotly_chart(figc, use_container_width=True, key="t1p_dist")
 
-            # Exploración de precios (ignora 'No aplica')
-            colg2.subheader("Precios (Médico vs Paciente)")
+            # Precios (ignora 'No aplica')
+            from math import isnan
             cat_aux = ensure_product_numeric_cols(cat.copy())
             pm = cat_aux['_Precio_Medico_num'].replace(0, np.nan)
             pp = cat_aux['_Precio_Paciente_num'].replace(0, np.nan)
@@ -495,11 +509,13 @@ with tab1:
                 use_container_width=True
             )
 
-    # -------- Clientes (Top-N con selector y layout lado a lado) --------
+    # -------- Clientes (Top-N lado a lado) --------
     with tab_r4:
         if "Cliente/Empresa" in dv.columns:
             top_n_cli = st.selectbox("Top-N Clientes", options=[5,10,15,20,30], index=1, key="t1_top_cli")
-            cli = dv.groupby("Cliente/Empresa", as_index=False)["Total"].sum().sort_values("Total", ascending=False)
+            cli = (dv.loc[dv['FECHA VENTA']<=max_date]
+                     .groupby("Cliente/Empresa", as_index=False)["Total"].sum()
+                     .sort_values("Total", ascending=False))
             top_cli = cli.head(top_n_cli)
             cC1, cC2 = st.columns(2)
             with cC1:
@@ -512,7 +528,7 @@ with tab1:
     # -------- Mapa de calor --------
     with tab_r6:
         if 'FECHA VENTA' in dv.columns:
-            work = dv.copy()
+            work = dv[(dv['FECHA VENTA'] >= min_date) & (dv['FECHA VENTA'] <= max_date)].copy()
             dt = work['FECHA VENTA']
             work["Mes"] = dt.dt.to_period("M").astype(str)
             work["DiaSemana"] = dt.dt.day_name()
