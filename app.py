@@ -294,7 +294,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ---------------------------------------------------------------------------------
-# TAB 1: ANÁLISIS DE VENTAS  (corregido: usa limpiar_moneda para Totales)
+# TAB 1: ANÁLISIS DE VENTAS  (corregido y robusto para hoja Productos)
 # ---------------------------------------------------------------------------------
 with tab1:
     st.header("Análisis General de Ventas")
@@ -309,22 +309,19 @@ with tab1:
     dfv['FECHA VENTA'] = pd.to_datetime(dfv['FECHA VENTA'], errors='coerce')
     dfv = dfv.dropna(subset=['FECHA VENTA'])
 
-    # Total como número real aunque venga como "$ 315.000"
-    # (esto corrige los meses recientes que estaban dando $0)
+    # Total como número real aunque venga como "$ 315.000" (esto arregla meses recientes)
     dfv['Total_num'] = dfv['Total'].apply(limpiar_moneda)
 
     # Cliente y Producto base (nombre sin la parte de precio)
     dfv['Cliente/Empresa'] = dfv.get('Cliente/Empresa', '').astype(str).str.strip().str.upper()
 
-    # 'Producto' suele venir como "Nombre - $xx.xxx ...", tomamos la parte antes del precio
     import re
     def _base_name(s: str) -> str:
         if not isinstance(s, str):
             return ""
-        # corta cuando aparezca " - $..." o " / $..."
-        return re.split(r'\s[-/]\s?\$', s.strip())[0].strip()
+        # corta cuando aparezca " - $..." o " / $..." o " - PRECIO..."
+        return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio', s.strip(), flags=re.IGNORECASE)[0].strip()
 
-    # si ya tenías 'Producto_Nombre' lo respetamos; si no, lo creamos
     if 'Producto_Nombre' not in dfv.columns and 'Producto' in dfv.columns:
         dfv['Producto_Nombre'] = dfv['Producto'].astype(str).apply(_base_name)
     elif 'Producto_Nombre' in dfv.columns:
@@ -366,8 +363,7 @@ with tab1:
         st.subheader("Evolución temporal")
 
         # Rango de fechas dinámico para la gráfica
-        colR1, colR2, colR3 = st.columns([2, 2, 2])
-        # rango por defecto: desde 2024-01-01 hasta fecha máxima
+        colR1, colR2, _ = st.columns([2, 2, 2])
         default_ini = max(inicio_2024.date(), fecha_min)
         rango = colR1.date_input(
             "Rango de fechas",
@@ -379,7 +375,7 @@ with tab1:
         else:
             f_ini, f_fin = pd.to_datetime(default_ini), pd.to_datetime(fecha_max)
 
-        # Agrupación para la curva (propia de esta gráfica, SIN "granularidad" global)
+        # Agrupación para la curva (propia de esta gráfica)
         gran_graf = colR2.selectbox("Agrupar por", ["Día", "Semana", "Mes"], index=0, key="t1_grp_graf")
 
         df_line = dfv[(dfv['FECHA VENTA'] >= f_ini) & (dfv['FECHA VENTA'] <= f_fin)].copy()
@@ -391,7 +387,6 @@ with tab1:
         else:  # Mes
             serie = df_line.groupby('Mes', as_index=False)['Total_num'].sum().rename(columns={'Mes': 'Periodo'})
 
-        # Mostrar
         if PLOTLY_OK and not serie.empty:
             st.plotly_chart(
                 px.line(serie, x='Periodo', y='Total_num', markers=True, title="Ventas en el rango seleccionado"),
@@ -404,21 +399,46 @@ with tab1:
     with tab_r3:
         st.subheader("Análisis por productos (filtrado por atributos del catálogo)")
 
-        # Normalizamos el catálogo de productos para enlazar con ventas
+        # ------- Normalización robusta de hoja Productos -------
         prod_raw = df_productos.copy()
 
-        # Renombrar columnas del catálogo según los nombres que indicaste
-        prod_map = {
-            'LISTA PRODUCTOS': 'Lista',
-            'TIPO DE PIEL': 'Tipo_Piel',
-            'CONDICION': 'Condicion',
-            # la columna viene con error tipográfico frecuente: "PROFESIONA o RETAIL"
-            'PROFESIONA o RETAIL': 'Canal',
-            'PRECIO PRO': 'Precio_Pro',
-            'PRECIO RETAIL': 'Precio_Retail',
-            'Marca': 'Marca'
-        }
-        prod_raw.rename(columns={c: prod_map.get(c, c) for c in prod_raw.columns}, inplace=True)
+        # Helper para localizar columnas ignorando mayúsculas/espacios/acentos
+        import unicodedata
+        def _norm(s):
+            s = str(s)
+            s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+            return s.strip().lower().replace('  ', ' ').replace('\t', ' ').replace('\n', ' ')
+
+        cols_norm = {_norm(c): c for c in prod_raw.columns}
+
+        def find_col(candidates):
+            for cand in candidates:
+                key = _norm(cand)
+                if key in cols_norm:
+                    return cols_norm[key]
+            # búsqueda por contains (por si hay espacios/sufijos)
+            for k_norm, k_real in cols_norm.items():
+                if any(_norm(c) in k_norm for c in candidates):
+                    return k_real
+            return None
+
+        col_lista   = find_col(["LISTA PRODUCTOS", "LISTA", "PRODUCTO", "PRODUCTO_NOMBRE"])
+        col_tipo    = find_col(["TIPO DE PIEL", "TIPO_PIEL", "PIEL"])
+        col_cond    = find_col(["CONDICION", "CONDICIÓN"])
+        col_marca   = find_col(["MARCA"])
+
+        # Construimos columnas estándar si existen
+        if col_lista:
+            prod_raw['Lista'] = prod_raw[col_lista].astype(str)
+        else:
+            prod_raw['Lista'] = ""  # evita KeyError aunque falte
+
+        if col_tipo:
+            prod_raw['Tipo_Piel'] = prod_raw[col_tipo].astype(str)
+        if col_cond:
+            prod_raw['Condicion'] = prod_raw[col_cond].astype(str)
+        if col_marca:
+            prod_raw['Marca'] = prod_raw[col_marca].astype(str)
 
         # Base de nombre para enlazar con ventas
         prod_raw['Producto_Base'] = prod_raw['Lista'].astype(str).apply(_base_name)
