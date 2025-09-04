@@ -1,5 +1,5 @@
 # ==============================================================================
-# APP: Dashboard AGMS – Ventas, Cartera, RFM (con ML), Predictivo y Cotizaciones
+# APP: Dashboard AGMS – Ventas, Cartera, RFM (con ML), Predictivo, Cotizaciones e Inventario
 # ==============================================================================
 
 import warnings
@@ -9,7 +9,7 @@ import os
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ---- Plotly (con chequeo) ----
 try:
@@ -39,7 +39,7 @@ RANDOM_STATE = 42
 # ==============================================================================
 # CONFIGURACIÓN
 # ==============================================================================
-st.set_page_config(page_title="Dashboard de Ventas AGMS", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Dashboard de Ventas AGMS", page_icon="", layout="wide")
 
 # ---- Portada con logo + título ----
 LOGO_CANDIDATES = ["ag2.jpg", "logo.png", "AGMS_logo.jpg", "ag_logo.jpg"]
@@ -50,7 +50,7 @@ with left:
     if logo_path:
         st.image(logo_path, use_container_width=True)
 with mid:
-    st.title("Dashboard AGMS: Ventas, Cartera, RFM, Predicción y Cotizaciones")
+    st.title("Dashboard AGMS: Ventas, Cartera, RFM, Predicción, Cotizaciones e Inventario")
 st.markdown("---")
 
 if not PLOTLY_OK:
@@ -62,171 +62,68 @@ if not PLOTLY_OK:
 # ==============================================================================
 def row_normalize(df_counts: pd.DataFrame) -> pd.DataFrame:
     """Normaliza cada fila para convertir conteos a proporciones."""
-    if df_counts.empty:
+    if df_counts is None or df_counts.empty:
         return df_counts
     sums = df_counts.sum(axis=1).replace(0, 1)
     return df_counts.div(sums, axis=0)
 
-def build_time_derivatives(df: pd.DataFrame, fecha_col: str) -> pd.DataFrame:
-    df = df.copy()
-    dt = pd.to_datetime(df[fecha_col], errors="coerce")
-    if "Mes" not in df.columns:
-        df["Mes"] = dt.dt.to_period("M").astype(str)
-    if "Semana" not in df.columns:
-        df["Semana"] = dt.dt.to_period("W").astype(str)
-    if "Día" not in df.columns:
-        df["Día"] = dt.dt.date
-    return df
-
 def limpiar_moneda(valor):
     try:
         if isinstance(valor, str):
-            valor_limpio = valor.replace('$', '').replace('.', '').replace(',', '.').strip()
+            valor_limpio = (
+                valor.replace('$', '')
+                     .replace('COP', '')
+                     .replace('COL$', '')
+                     .replace(' ', '')
+                     .replace('.', '')
+                     .replace(',', '.')
+                     .strip()
+            )
+            # Trata 'No aplica' o vacíos como NaN -> 0.0 después
+            if valor_limpio == '' or valor.strip().lower().startswith('no aplica'):
+                return np.nan
             return float(valor_limpio)
         elif isinstance(valor, (int, float)):
             return float(valor)
-        return 0.0
+        return np.nan
     except (ValueError, TypeError):
-        return 0.0
+        return np.nan
 
-# ===== RFM helpers =====
-def _safe_qcut_score(series, ascending, labels=[1,2,3,4,5]):
-    s = series.copy()
-    rk = s.rank(method='first', ascending=ascending)
-    try:
-        q = pd.qcut(rk, 5, labels=labels)
-        return q.astype(int)
-    except Exception:
-        q = pd.cut(rk, bins=5, labels=labels, include_lowest=True, duplicates='drop')
-        q = q.astype('float')
-        fill_val = np.ceil(q.mean()) if not np.isnan(q.mean()) else 3
-        return q.fillna(fill_val).astype(int)
-
-def rfm_segment(row):
-    r,f,m = row['R_Score'], row['F_Score'], row['M_Score']
-    if r>=4 and f>=4 and m>=4: return "Champions"
-    if r>=4 and f>=3: return "Loyal"
-    if r>=3 and f>=3 and m>=3: return "Potential Loyalist"
-    if r<=2 and f>=4: return "At Risk"
-    if r<=2 and f<=2 and m<=2: return "Hibernating"
-    if r>=3 and f<=2: return "New"
-    return "Need Attention"
-
-def compute_rfm_table(dfv: pd.DataFrame) -> pd.DataFrame:
-    if 'FECHA VENTA' not in dfv.columns:
-        return pd.DataFrame()
-    tmp = dfv.copy()
-    tmp['FECHA VENTA'] = pd.to_datetime(tmp['FECHA VENTA'], errors="coerce")
-    tmp = tmp.dropna(subset=['FECHA VENTA'])
-    ref = tmp['FECHA VENTA'].max()
-    tiene_factura = ('NÚMERO DE FACTURA' in tmp.columns)
-
-    rfm = tmp.groupby('Cliente/Empresa').agg(
-        Recencia=('FECHA VENTA', lambda s: (ref - s.max()).days),
-        Frecuencia=('NÚMERO DE FACTURA','nunique') if tiene_factura else ('FECHA VENTA','count'),
-        Monetario=('Total','sum')
-    ).reset_index()
-
-    rfm['R_Score'] = _safe_qcut_score(rfm['Recencia'],  ascending=True,  labels=[5,4,3,2,1])
-    rfm['F_Score'] = _safe_qcut_score(rfm['Frecuencia'], ascending=False, labels=[1,2,3,4,5])
-    rfm['M_Score'] = _safe_qcut_score(rfm['Monetario'],  ascending=False, labels=[1,2,3,4,5])
-    rfm['Segmento'] = rfm.apply(rfm_segment, axis=1).fillna("Sin Segmento")
-    return rfm
-
-# ===== Utilidades de Productos (precios) =====
 def _to_num_price(series_like):
-    """
-    Convierte precios tipo '$1.234.567,89' o 'No aplica' a float.
-    Devuelve NaN cuando no aplica o no puede convertirse.
-    """
+    """Convierte precios tipo '$1.234.567,89' o 'No aplica' a float (NaN si no aplica)."""
     s = pd.Series(series_like).astype(str)
-    s = (s.str.replace('$', '', regex=False)
-           .str.replace('.', '', regex=False)   # miles
-           .str.replace(',', '.', regex=False)  # decimales
-           .str.strip())
-    s = s.mask(s.str.contains(r'no\s*aplica|n/?a', case=False, regex=True), np.nan)
+    s = (
+        s.str.replace('COP', '', regex=False)
+         .str.replace('COL$', '', regex=False)
+         .str.replace('$', '', regex=False)
+         .str.replace(' ', '', regex=False)
+         .str.replace('.', '', regex=False)   # miles
+         .str.replace(',', '.', regex=False)  # decimales
+         .str.strip()
+    )
+    s = s.mask(s.str.contains(r'no\s*aplica|n/?a|nan|^$', case=False, regex=True), np.nan)
     return pd.to_numeric(s, errors='coerce')
-
-def ensure_product_numeric_cols(df_prod: pd.DataFrame) -> pd.DataFrame:
-    """
-    Garantiza que existan:
-      - _Precio_Medico_num (float)
-      - _Precio_Paciente_num (float)
-      - NA_Medico (bool) y NA_Paciente (bool)
-    aunque cambien los nombres originales de columnas.
-    """
-    if df_prod is None or df_prod.empty:
-        return df_prod
-
-    # mapa de nombres (sin espacios extra)
-    name_map = {c.strip(): c for c in df_prod.columns}
-
-    def _find_col(candidates):
-        # intento exacto
-        for cand in candidates:
-            if cand in name_map:
-                return name_map[cand]
-        # intento normalizado (lower + underscores)
-        for k in list(name_map.keys()):
-            kn = k.lower().replace(' ', '_')
-            if kn in [c.lower().replace(' ', '_') for c in candidates]:
-                return name_map[k]
-        return None
-
-    col_pm = _find_col(['Precio_Medico', 'Precio Medico', 'PRECIO MEDICO', 'Precio_Médico', 'Precio Médico'])
-    col_pp = _find_col(['Precio_Paciente', 'Precio Paciente', 'PRECIO PACIENTE'])
-
-    # numéricos auxiliares
-    if '_Precio_Medico_num' not in df_prod.columns:
-        df_prod['_Precio_Medico_num'] = _to_num_price(df_prod[col_pm]) if col_pm else np.nan
-    if '_Precio_Paciente_num' not in df_prod.columns:
-        df_prod['_Precio_Paciente_num'] = _to_num_price(df_prod[col_pp]) if col_pp else np.nan
-
-    # banderas NA_* (No aplica o sin precio)
-    if 'NA_Medico' not in df_prod.columns:
-        if col_pm:
-            df_prod['NA_Medico'] = (
-                df_prod[col_pm].astype(str).str.contains(r'no\s*aplica|n/?a', case=False, regex=True)
-                | df_prod['_Precio_Medico_num'].isna()
-            )
-        else:
-            df_prod['NA_Medico'] = True
-
-    if 'NA_Paciente' not in df_prod.columns:
-        if col_pp:
-            df_prod['NA_Paciente'] = (
-                df_prod[col_pp].astype(str).str.contains(r'no\s*aplica|n/?a', case=False, regex=True)
-                | df_prod['_Precio_Paciente_num'].isna()
-            )
-        else:
-            df_prod['NA_Paciente'] = True
-
-    return df_prod
 
 def parse_fecha_col(col):
     """
     Convierte una columna heterogénea a datetime soportando:
     - Textos (dd/mm/yyyy, yyyy-mm-dd, etc.)
     - Seriales de Excel (días desde 1899-12-30)
-
-    Evita TypeError garantizando que al modo 'unit=d' solo entren floats válidos.
     """
     s = pd.Series(col)
 
-    # 1) Texto (día-primero)
-    dt_dayfirst = pd.to_datetime(s.astype(str), dayfirst=True, errors='coerce')
-
-    # 2) Texto (año-primero) como fallback
+    # Primero intenta todo como texto
+    dt_dayfirst  = pd.to_datetime(s.astype(str), dayfirst=True,  errors='coerce')
     dt_yearfirst = pd.to_datetime(s.astype(str), yearfirst=True, errors='coerce')
 
-    # 3) Serial de Excel SOLO para valores numéricos claros
+    # Serial de Excel SOLO para numéricos claros (enteros/decimales positivos)
     def _num_or_nan(x):
         if pd.isna(x):
             return np.nan
         if isinstance(x, (int, float)) and np.isfinite(x):
             return float(x)
         xs = str(x).strip()
-        # Acepta enteros/decimales positivos como serial Excel
+        # Admite números con punto decimal
         if xs.replace('.', '', 1).isdigit():
             try:
                 return float(xs)
@@ -235,19 +132,67 @@ def parse_fecha_col(col):
         return np.nan
 
     nums = s.map(_num_or_nan)
-
     dt_serial = pd.Series(pd.NaT, index=s.index, dtype='datetime64[ns]')
     mask = nums.notna()
     if mask.any():
-        # Solo floats válidos hacia to_datetime con unit='d'
         dt_serial.loc[mask] = pd.to_datetime(
             nums.loc[mask].astype('float64'),
             unit='d', origin='1899-12-30', errors='coerce'
         )
 
-    # Combina: texto(día-primero) -> texto(año-primero) -> serial Excel
     return dt_dayfirst.combine_first(dt_yearfirst).combine_first(dt_serial)
 
+def ensure_product_numeric_cols(df_prod: pd.DataFrame) -> pd.DataFrame:
+    """
+    Garantiza columnas auxiliares en hoja Productos:
+    - Producto_Nombre, Tipo_Piel, Condicion, Canal, Precio_Pro_num, Precio_Retail_num
+    - Stock (si existe con varios nombres), Min/Max (si existen)
+    """
+    if df_prod is None or df_prod.empty:
+        return df_prod.copy()
+
+    df = df_prod.copy()
+
+    # Renombrado estándar segun tus columnas declaradas
+    rename_map = {
+        'LISTA PRODUCTOS': 'Producto_Nombre',
+        'LISTA_PRODUCTOS': 'Producto_Nombre',
+        'Producto': 'Producto_Nombre',
+        'TIPO DE PIEL': 'Tipo_Piel',
+        'CONDICION': 'Condicion',
+        'PROFESIONA o RETAIL': 'Canal',     # ojo al typo
+        'PROFESIONAL o RETAIL': 'Canal',
+        'PRECIO PRO': 'Precio_Pro',
+        'PRECIO RETAIL': 'Precio_Retail',
+        'Marca': 'Marca',
+        'MARCA': 'Marca',
+        'STOCK': 'Stock',
+        'EXISTENCIAS': 'Stock',
+        'INVENTARIO': 'Stock',
+        'MÍNIMO': 'Minimo',
+        'MINIMO': 'Minimo',
+        'MÁXIMO': 'Maximo',
+        'MAXIMO': 'Maximo'
+    }
+    df.rename(columns={c: rename_map.get(c, c) for c in df.columns}, inplace=True)
+
+    if 'Producto_Nombre' in df.columns:
+        df['Producto_Nombre'] = df['Producto_Nombre'].astype(str).str.strip()
+
+    # Precios numéricos
+    df['Precio_Pro_num']    = _to_num_price(df.get('Precio_Pro'))
+    df['Precio_Retail_num'] = _to_num_price(df.get('Precio_Retail'))
+
+    # Stock y min/max si existen
+    for col in ['Stock', 'Minimo', 'Maximo']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    # Canal en str
+    if 'Canal' in df.columns:
+        df['Canal'] = df['Canal'].astype(str).str.strip()
+
+    return df
 
 # ==============================================================================
 # CARGA DE DATOS
@@ -256,70 +201,123 @@ def parse_fecha_col(col):
 def load_data():
     file_path = 'DB_AGMS.xlsx'
     try:
-        df_ventas     = pd.read_excel(file_path, sheet_name='Ventas', header=1)
-        df_medicos    = pd.read_excel(file_path, sheet_name='Lista Medicos')
-        df_metadatos  = pd.read_excel(file_path, sheet_name='Metadatos')
-        df_cartera    = pd.read_excel(file_path, sheet_name='Cartera')      # renombrada
-        df_productos  = pd.read_excel(file_path, sheet_name='Productos')    # nueva hoja
+        # ---- Ventas: intenta header=0; si no trae FECHA VENTA prueba header=1
+        df_ventas = pd.read_excel(file_path, sheet_name='Ventas', header=0)
+        if 'FECHA VENTA' not in df_ventas.columns and 'FECHA_VENTA' in df_ventas.columns:
+            df_ventas.rename(columns={'FECHA_VENTA': 'FECHA VENTA'}, inplace=True)
+        if 'FECHA VENTA' not in df_ventas.columns:
+            df_ventas = pd.read_excel(file_path, sheet_name='Ventas', header=1)
 
-        # Ventas
+        # ---- Otras hojas
+        try:
+            df_medicos = pd.read_excel(file_path, sheet_name='Lista Medicos')
+        except Exception:
+            df_medicos = pd.DataFrame()
+
+        try:
+            df_metadatos = pd.read_excel(file_path, sheet_name='Metadatos')
+        except Exception:
+            df_metadatos = pd.DataFrame()
+
+        try:
+            df_cartera = pd.read_excel(file_path, sheet_name='Cartera')
+        except Exception:
+            df_cartera = pd.DataFrame()
+
+        try:
+            df_productos = pd.read_excel(file_path, sheet_name='Productos')
+        except Exception:
+            df_productos = pd.DataFrame()
+
+        # ===================== Limpieza Ventas =====================
+        # FECHA VENTA robusta
         if 'FECHA VENTA' in df_ventas.columns:
-            df_ventas.dropna(subset=['FECHA VENTA'], inplace=True)
-            df_ventas['FECHA VENTA'] = pd.to_datetime(df_ventas['FECHA VENTA'], errors='coerce')
-            df_ventas['Mes'] = df_ventas['FECHA VENTA'].dt.to_period('M').astype(str)
-            df_ventas['Dia_Semana'] = df_ventas['FECHA VENTA'].dt.day_name()
-            df_ventas['Hora'] = df_ventas['FECHA VENTA'].dt.hour
+            df_ventas['FECHA VENTA'] = parse_fecha_col(df_ventas['FECHA VENTA'])
+        else:
+            # intenta alguna variante común
+            alt = next((c for c in df_ventas.columns if 'FECHA' in c.upper()), None)
+            if alt:
+                df_ventas['FECHA VENTA'] = parse_fecha_col(df_ventas[alt])
+            else:
+                st.error("No se encontró columna de fecha en la hoja Ventas.")
+                return None, None, None, None, None
 
-        for col in ['Total', 'Cantidad', 'Precio Unidad']:
-            if col in df_ventas.columns:
-                df_ventas[col] = pd.to_numeric(df_ventas[col], errors='coerce').fillna(0)
+        df_ventas = df_ventas.dropna(subset=['FECHA VENTA'])
 
+        # Total numérico robusto (intenta varias columnas)
+        total_col_candidates = ['Total', 'VALOR TOTAL', 'VALOR_TOTAL', 'TOTAL']
+        total_col = next((c for c in total_col_candidates if c in df_ventas.columns), None)
+        if total_col is None:
+            # crea Total a 0 si no existe
+            df_ventas['Total'] = 0.0
+            total_col = 'Total'
+        df_ventas['Total'] = df_ventas[total_col]
+        df_ventas['Total_num'] = pd.to_numeric(
+            df_ventas['Total'].astype(str)
+                              .str.replace('COP', '', regex=False)
+                              .str.replace('COL$', '', regex=False)
+                              .str.replace('$', '', regex=False)
+                              .str.replace(' ', '', regex=False)
+                              .str.replace('.', '', regex=False)
+                              .str.replace(',', '.', regex=False),
+            errors='coerce'
+        ).fillna(0.0)
+
+        # Cliente normalizado
         if 'Cliente/Empresa' in df_ventas.columns:
             df_ventas['Cliente/Empresa'] = df_ventas['Cliente/Empresa'].astype(str).str.strip().str.upper()
 
-        if 'Producto' in df_ventas.columns:
-            df_ventas['Producto_Nombre'] = df_ventas['Producto'].astype(str).apply(lambda x: x.split(' - ')[0])
+        # Producto_Nombre deducido si no existe
+        if 'Producto_Nombre' not in df_ventas.columns:
+            if 'Producto' in df_ventas.columns:
+                import re
+                def _base_name(s: str) -> str:
+                    s = str(s)
+                    return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio|\s-\s', s, flags=re.IGNORECASE)[0].strip()
+                df_ventas['Producto_Nombre'] = df_ventas['Producto'].astype(str).apply(_base_name)
+            else:
+                # busca alguna columna con producto
+                prod_alt = next((c for c in df_ventas.columns if 'PRODUCT' in c.upper()), None)
+                if prod_alt:
+                    df_ventas['Producto_Nombre'] = df_ventas[prod_alt].astype(str)
+                else:
+                    df_ventas['Producto_Nombre'] = '(SIN PRODUCTO)'
 
-        # Médicos
-        if 'NOMBRE' in df_medicos.columns:
-            df_medicos['NOMBRE'] = df_medicos['NOMBRE'].astype(str).str.strip().str.upper()
-        if 'TELEFONO' in df_medicos.columns:
-            df_medicos['TELEFONO'] = df_medicos['TELEFONO'].fillna('').astype(str)
+        # Derivadas de tiempo
+        df_ventas['Año']       = df_ventas['FECHA VENTA'].dt.year
+        df_ventas['Mes_P']     = df_ventas['FECHA VENTA'].dt.to_period('M')
+        df_ventas['Semana_P']  = df_ventas['FECHA VENTA'].dt.to_period('W')
+        df_ventas['Día']       = df_ventas['FECHA VENTA'].dt.date
+        df_ventas['Mes']       = df_ventas['Mes_P'].astype(str)    # 'YYYY-MM'
+        df_ventas['Semana']    = df_ventas['Semana_P'].astype(str) # 'YYYY-Wxx'
+        df_ventas['DiaSemana'] = df_ventas['FECHA VENTA'].dt.day_name()
 
-        # Cartera: normaliza nombres
-        rename_map = {
-            'Numero de Factura': 'NÚMERO DE FACTURA',
-            'NUMERO DE FACTURA': 'NÚMERO DE FACTURA',
-            'Num Factura': 'NÚMERO DE FACTURA',
-            'Cliente': 'Nombre cliente',
-            'CLIENTE': 'Nombre cliente',
-            'Fecha Vencimiento': 'Fecha de Vencimiento',
-            'SALDO PENDIENTE': 'Saldo pendiente'
-        }
-        df_cartera.rename(columns={c: rename_map.get(c, c) for c in df_cartera.columns}, inplace=True)
+        # ===================== Médicos =====================
+        if not df_medicos.empty:
+            if 'NOMBRE' in df_medicos.columns:
+                df_medicos['NOMBRE'] = df_medicos['NOMBRE'].astype(str).str.strip().str.upper()
+            if 'TELEFONO' in df_medicos.columns:
+                df_medicos['TELEFONO'] = df_medicos['TELEFONO'].fillna('').astype(str)
 
-        if 'Fecha de Vencimiento' in df_cartera.columns:
-            df_cartera.dropna(subset=['Fecha de Vencimiento'], inplace=True)
-            df_cartera['Fecha de Vencimiento'] = pd.to_datetime(df_cartera['Fecha de Vencimiento'], errors='coerce')
-        for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
-            if col in df_cartera.columns:
-                df_cartera[col] = df_cartera[col].fillna(0).apply(limpiar_moneda)
+        # ===================== Cartera =====================
+        if not df_cartera.empty:
+            rename_map = {
+                'Numero de Factura': 'NÚMERO DE FACTURA',
+                'NUMERO DE FACTURA': 'NÚMERO DE FACTURA',
+                'Num Factura': 'NÚMERO DE FACTURA',
+                'Cliente': 'Nombre cliente',
+                'CLIENTE': 'Nombre cliente',
+                'Fecha Vencimiento': 'Fecha de Vencimiento',
+                'SALDO PENDIENTE': 'Saldo pendiente'
+            }
+            df_cartera.rename(columns={c: rename_map.get(c, c) for c in df_cartera.columns}, inplace=True)
+            if 'Fecha de Vencimiento' in df_cartera.columns:
+                df_cartera['Fecha de Vencimiento'] = pd.to_datetime(df_cartera['Fecha de Vencimiento'], errors='coerce')
+            for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
+                if col in df_cartera.columns:
+                    df_cartera[col] = df_cartera[col].apply(limpiar_moneda).fillna(0.0)
 
-        # Productos
-        prod_rename = {
-            'LISTA PRODUCTOS': 'Producto_Nombre',
-            'TIPO DE PIEL': 'Tipo_Piel',
-            'CONDICION': 'Condicion',
-            'PROFESIONAL o RETAIL': 'Canal',
-            'Precio Medico': 'Precio_Medico',
-            'Precio Paciente': 'Precio_Paciente',
-            'Marca': 'Marca'
-        }
-        df_productos.rename(columns={c: prod_rename.get(c, c) for c in df_productos.columns}, inplace=True)
-        if 'Producto_Nombre' in df_productos.columns:
-            df_productos['Producto_Nombre'] = df_productos['Producto_Nombre'].astype(str).str.strip()
-
-        # Asegurar columnas numéricas auxiliares y banderas NA_* (robusto)
+        # ===================== Productos =====================
         df_productos = ensure_product_numeric_cols(df_productos)
 
         return df_ventas, df_medicos, df_metadatos, df_cartera, df_productos
@@ -328,64 +326,24 @@ def load_data():
         return None, None, None, None, None
 
 df_ventas, df_medicos, df_metadatos, df_cartera, df_productos = load_data()
-if df_ventas is None or df_cartera is None or df_productos is None:
+if df_ventas is None:
     st.stop()
 
 # ==============================================================================
-# TABS PRINCIPALES (actualizado: sin "Series" ni "Pareto")
+# TABS PRINCIPALES (sin "Series" ni "Pareto") + Inventario nuevo
 # ==============================================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Análisis de Ventas", "Gestión de Cartera", "Análisis RFM",
-    "Modelo Predictivo de Compradores Potenciales", "Cotizaciones"
+    "Modelo Predictivo de Compradores Potenciales", "Cotizaciones", "Inventario"
 ])
 
 # ---------------------------------------------------------------------------------
-# TAB 1: ANÁLISIS DE VENTAS
+# TAB 1: ANÁLISIS DE VENTAS (corregido)
 # ---------------------------------------------------------------------------------
 with tab1:
     st.header("Análisis General de Ventas")
 
     dfv = df_ventas.copy()
-    if 'FECHA VENTA' not in dfv.columns:
-        st.warning("No se encuentra la columna 'FECHA VENTA' en la hoja Ventas.")
-        st.stop()
-
-    # ✅ Parseo robusto de fechas y limpieza
-    dfv['FECHA VENTA'] = parse_fecha_col(dfv['FECHA VENTA'])
-    dfv = dfv.dropna(subset=['FECHA VENTA'])
-
-    # Total numérico robusto
-    if 'Total' in dfv.columns:
-        dfv['Total_num'] = pd.to_numeric(
-            dfv['Total'].astype(str)
-                         .str.replace('$', '', regex=False)
-                         .str.replace('.', '', regex=False)   # miles
-                         .str.replace(',', '.', regex=False)  # decimales
-                         .str.strip(),
-            errors='coerce'
-        ).fillna(0.0)
-    else:
-        dfv['Total_num'] = 0.0
-
-    # Normalizaciones útiles
-    if 'Cliente/Empresa' in dfv.columns:
-        dfv['Cliente/Empresa'] = dfv['Cliente/Empresa'].astype(str).str.strip().str.upper()
-    if 'Producto_Nombre' not in dfv.columns and 'Producto' in dfv.columns:
-        import re
-        def _base_name(s: str) -> str:
-            s = str(s)
-            # corta antes de separadores comunes " - " o patrones con precio
-            return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio|\s-\s', s, flags=re.IGNORECASE)[0].strip()
-        dfv['Producto_Nombre'] = dfv['Producto'].astype(str).apply(_base_name)
-
-    # ✅ Derivadas de tiempo
-    dfv['Año']      = dfv['FECHA VENTA'].dt.year
-    dfv['Mes_P']    = dfv['FECHA VENTA'].dt.to_period('M')
-    dfv['Semana_P'] = dfv['FECHA VENTA'].dt.to_period('W')
-    dfv['Día']      = dfv['FECHA VENTA'].dt.date
-    dfv['Mes']      = dfv['Mes_P'].astype(str)     # 'YYYY-MM'
-    dfv['Semana']   = dfv['Semana_P'].astype(str)  # 'YYYY-Wxx'
-    dfv['DiaSemana'] = dfv['FECHA VENTA'].dt.day_name()
 
     # ========================= KPIs Generales =========================
     total_ventas = float(dfv["Total_num"].sum())
@@ -409,7 +367,7 @@ with tab1:
     with tab_r1:
         st.subheader("Evolución de Ventas")
 
-        # Selector de rango de fechas (por defecto: todo el histórico que exista)
+        # Rango dinámico (todo el histórico por defecto)
         min_date, max_date = dfv['FECHA VENTA'].min().date(), dfv['FECHA VENTA'].max().date()
         rango = st.date_input(
             "Selecciona rango de fechas",
@@ -426,6 +384,7 @@ with tab1:
         else:
             dfv_rango = dfv
 
+        # Serie diaria
         serie = (dfv_rango
                  .groupby(dfv_rango['FECHA VENTA'].dt.date, as_index=False)['Total_num']
                  .sum()
@@ -436,7 +395,7 @@ with tab1:
         )
         st.plotly_chart(fig_line, use_container_width=True, key="t1_line")
 
-        # 🔎 Consulta puntual por Año/Mes/Semana/Día
+        # 🔎 Consulta por Año/Mes/Semana/Día (suma exacta)
         with st.expander("🔎 Consultar valor por período (Año / Mes / Semana / Día)"):
             periodo = st.radio("Periodo", ["Año","Mes","Semana","Día"], horizontal=True, key="t1_periodo")
 
@@ -446,7 +405,7 @@ with tab1:
                 valor = dfv.loc[dfv["Año"] == sel, "Total_num"].sum()
 
             elif periodo == "Mes":
-                opciones = sorted(dfv["Mes"].unique())   # incluye meses recientes como 2025-08, 2025-09 si existen
+                opciones = sorted(dfv["Mes"].unique())   # p.ej. 2024-08, 2024-09
                 sel = st.selectbox("Selecciona mes (YYYY-MM)", opciones, key="t1_sel_month")
                 valor = dfv.loc[dfv["Mes"] == sel, "Total_num"].sum()
 
@@ -462,7 +421,7 @@ with tab1:
 
             st.metric("Valor seleccionado", f"${valor:,.0f}")
 
-    # -------- Subpestaña: Productos
+    # -------- Subpestaña: Productos (con filtros Tipo de piel y Condición)
     with tab_r2:
         st.subheader("Análisis por Productos")
 
@@ -480,52 +439,54 @@ with tab1:
             with colp2:
                 st.dataframe(prod, use_container_width=True)
 
-        # Filtros avanzados con la hoja Productos (nombres según tu archivo)
+        # Filtros con hoja Productos (Tipo_Piel/Condicion) y análisis de Canal según ventas
         if df_productos is not None and not df_productos.empty:
-            # Normaliza nombres de columnas de Productos a un estándar
-            prod_raw = df_productos.copy()
-            rename_map = {
-                'LISTA PRODUCTOS': 'Producto_Nombre',
-                'TIPO DE PIEL': 'Tipo_Piel',
-                'CONDICION': 'Condicion',
-                'PROFESIONA o RETAIL': 'Canal',
-                'PRECIO PRO': 'Precio_Pro',
-                'PRECIO RETAIL': 'Precio_Retail',
-                'Marca': 'Marca'
-            }
-            prod_raw.rename(columns={c: rename_map.get(c, c) for c in prod_raw.columns}, inplace=True)
-
+            prod_map = df_productos.copy()
             campos_ok = {'Producto_Nombre','Tipo_Piel','Condicion'}
-            if campos_ok.issubset(prod_raw.columns):
+            if campos_ok.issubset(prod_map.columns):
                 st.markdown("#### Filtros por características del producto")
-                tipos_piel = sorted(prod_raw['Tipo_Piel'].dropna().astype(str).unique())
-                conds      = sorted(prod_raw['Condicion'].dropna().astype(str).unique())
+                tipos_piel = sorted(prod_map['Tipo_Piel'].dropna().astype(str).unique())
+                conds      = sorted(prod_map['Condicion'].dropna().astype(str).unique())
                 f_piel = st.selectbox("Selecciona Tipo de Piel", ["(Todos)"] + tipos_piel, key="t1_piel")
                 f_cond = st.selectbox("Selecciona Condición", ["(Todos)"] + conds, key="t1_cond")
 
-                # Mapeo producto -> características
-                prod_map = prod_raw[['Producto_Nombre','Tipo_Piel','Condicion']].drop_duplicates()
-                dfv_merge = dfv.merge(prod_map, on="Producto_Nombre", how="left")
+                dfv_merge = dfv.merge(prod_map[['Producto_Nombre','Tipo_Piel','Condicion','Canal']].drop_duplicates(),
+                                      on="Producto_Nombre", how="left")
 
                 if f_piel != "(Todos)":
                     dfv_merge = dfv_merge[dfv_merge['Tipo_Piel'] == f_piel]
                 if f_cond != "(Todos)":
                     dfv_merge = dfv_merge[dfv_merge['Condicion'] == f_cond]
 
+                # Resumen por producto (filtrado)
                 if not dfv_merge.empty:
-                    resumen = (dfv_merge.groupby("Producto_Nombre", as_index=False)["Total_num"]
-                                       .sum()
-                                       .sort_values("Total_num", ascending=False))
-                    fig2 = px.bar(resumen, x="Total_num", y="Producto_Nombre",
-                                  orientation="h",
-                                  title="Ventas filtradas por Tipo de Piel / Condición")
-                    fig2.update_layout(yaxis={'categoryorder':'total ascending'})
-                    st.plotly_chart(fig2, use_container_width=True)
-                    st.dataframe(resumen, use_container_width=True)
+                    resumen_prod = (dfv_merge.groupby("Producto_Nombre", as_index=False)["Total_num"]
+                                             .sum()
+                                             .sort_values("Total_num", ascending=False))
+                    colx1, colx2 = st.columns(2)
+                    with colx1:
+                        st.plotly_chart(
+                            px.bar(resumen_prod.head(20), x="Total_num", y="Producto_Nombre",
+                                   orientation="h", title="Ventas por Producto (filtrado)"),
+                            use_container_width=True
+                        )
+                    with colx2:
+                        st.dataframe(resumen_prod, use_container_width=True)
+
+                    # Resumen por Canal (derivado de selección de piel/condición)
+                    if 'Canal' in dfv_merge.columns and not dfv_merge['Canal'].isna().all():
+                        por_canal = (dfv_merge.groupby("Canal", as_index=False)['Total_num'].sum()
+                                             .sort_values('Total_num', ascending=False))
+                        st.plotly_chart(
+                            px.bar(por_canal, x="Canal", y="Total_num", title="Ventas por Canal (según filtro)"),
+                            use_container_width=True
+                        )
                 else:
                     st.info("No hay ventas para el filtro seleccionado.")
             else:
-                st.info("La hoja 'Productos' no tiene las columnas esperadas para filtros (LISTA PRODUCTOS / TIPO DE PIEL / CONDICION).")
+                st.info("La hoja 'Productos' debe tener: LISTA PRODUCTOS / TIPO DE PIEL / CONDICION / PROFESIONA o RETAIL / PRECIOS.")
+        else:
+            st.info("No se encontró la hoja 'Productos'.")
 
     # -------- Subpestaña: Clientes
     with tab_r3:
@@ -536,10 +497,10 @@ with tab1:
                    .sort_values("Total_num", ascending=False).head(topn_cli))
             colc1, colc2 = st.columns(2)
             with colc1:
-                fig = px.bar(cli, x="Total_num", y="Cliente/Empresa",
-                             orientation="h", title=f"Top {topn_cli} Clientes")
-                fig.update_layout(yaxis={'categoryorder':'total ascending'})
-                st.plotly_chart(fig, use_container_width=True)
+                figc = px.bar(cli, x="Total_num", y="Cliente/Empresa",
+                              orientation="h", title=f"Top {topn_cli} Clientes")
+                figc.update_layout(yaxis={'categoryorder':'total ascending'})
+                st.plotly_chart(figc, use_container_width=True)
             with colc2:
                 st.dataframe(cli, use_container_width=True)
 
@@ -548,7 +509,6 @@ with tab1:
         st.subheader("Mapa de calor (Día x Mes)")
         heat = (dfv.groupby(['DiaSemana','Mes'], as_index=False)['Total_num']
                   .sum())
-        # Orden de días en inglés (por day_name)
         orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
         heat['DiaSemana'] = pd.Categorical(heat['DiaSemana'], categories=orden_dias, ordered=True)
         heat_pivot = heat.pivot(index='DiaSemana', columns='Mes', values='Total_num').fillna(0)
@@ -556,110 +516,118 @@ with tab1:
             px.imshow(heat_pivot, aspect="auto", title="Heatmap de Ventas (Día de semana x Mes)"),
             use_container_width=True
         )
+
 # ---------------------------------------------------------------------------------
-# TAB 2: GESTIÓN DE CARTERA (lee Cartera y une COMERCIAL por factura)
+# TAB 2: GESTIÓN DE CARTERA
 # ---------------------------------------------------------------------------------
 with tab2:
     st.header("Gestión de Cartera")
 
-    dfc = df_cartera.copy()
-
-    if 'Fecha de Vencimiento' in dfc.columns:
-        dfc['Fecha de Vencimiento'] = pd.to_datetime(dfc['Fecha de Vencimiento'], errors='coerce')
-
-    for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
-        if col in dfc.columns:
-            dfc[col] = dfc[col].fillna(0).apply(limpiar_moneda)
-
-    # Unir COMERCIAL desde ventas por NÚMERO DE FACTURA
-    if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
-        dfc['NÚMERO DE FACTURA'] = dfc['NÚMERO DE FACTURA'].astype(str).str.strip()
-        dfv_fact = df_ventas[['NÚMERO DE FACTURA', 'COMERCIAL']].dropna(subset=['NÚMERO DE FACTURA']).copy()
-        dfv_fact['NÚMERO DE FACTURA'] = dfv_fact['NÚMERO DE FACTURA'].astype(str).str.strip()
-        dfc = dfc.merge(dfv_fact.drop_duplicates(), on='NÚMERO DE FACTURA', how='left')
+    if df_cartera is None or df_cartera.empty:
+        st.info("No se encontró la hoja 'Cartera'.")
     else:
-        dfc['COMERCIAL'] = "No disponible"
+        dfc = df_cartera.copy()
 
-    hoy = datetime.now()
-    if 'Fecha de Vencimiento' in dfc.columns:
-        dfc['Dias_Vencimiento'] = (dfc['Fecha de Vencimiento'] - hoy).dt.days
-    else:
-        dfc['Dias_Vencimiento'] = np.nan
+        if 'Fecha de Vencimiento' in dfc.columns:
+            dfc['Fecha de Vencimiento'] = pd.to_datetime(dfc['Fecha de Vencimiento'], errors='coerce')
 
-    def get_status(row):
-        sp = row.get('Saldo pendiente', np.nan)
-        dv = row.get('Dias_Vencimiento', np.nan)
-        if pd.notna(sp) and sp <= 0:
-            return 'Pagada'
-        if pd.notna(dv) and dv < 0 and pd.notna(sp) and sp > 0:
-            return 'Vencida'
-        if pd.notna(sp) and sp > 0:
-            return 'Por Vencer'
-        return 'Sin información'
+        for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
+            if col in dfc.columns:
+                dfc[col] = dfc[col].apply(limpiar_moneda).fillna(0.0)
 
-    dfc['Estado'] = dfc.apply(get_status, axis=1)
+        # Unir COMERCIAL desde ventas por NÚMERO DE FACTURA
+        if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
+            dfc['NÚMERO DE FACTURA'] = dfc['NÚMERO DE FACTURA'].astype(str).str.strip()
+            dfv_fact = df_ventas[['NÚMERO DE FACTURA']].copy()
+            if 'COMERCIAL' in df_ventas.columns:
+                dfv_fact['COMERCIAL'] = df_ventas['COMERCIAL']
+            else:
+                dfv_fact['COMERCIAL'] = np.nan
+            dfv_fact['NÚMERO DE FACTURA'] = dfv_fact['NÚMERO DE FACTURA'].astype(str).str.strip()
+            dfc = dfc.merge(dfv_fact.drop_duplicates(), on='NÚMERO DE FACTURA', how='left')
+        else:
+            dfc['COMERCIAL'] = dfc.get('COMERCIAL', "No disponible").fillna("No disponible")
 
-    saldo_total = float(dfc.loc[dfc['Estado'] != 'Pagada', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
-    saldo_vencido = float(dfc.loc[dfc['Estado'] == 'Vencida', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
-    saldo_por_vencer = float(dfc.loc[dfc['Estado'] == 'Por Vencer', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+        hoy = datetime.now()
+        if 'Fecha de Vencimiento' in dfc.columns:
+            dfc['Dias_Vencimiento'] = (dfc['Fecha de Vencimiento'] - hoy).dt.days
+        else:
+            dfc['Dias_Vencimiento'] = np.nan
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Saldo Total Pendiente", f"${saldo_total:,.0f}")
-    c2.metric("Total Vencido", f"${saldo_vencido:,.0f}", delta="Riesgo Alto", delta_color="inverse")
-    c3.metric("Total por Vencer", f"${saldo_por_vencer:,.0f}")
-    st.markdown("---")
+        def get_status(row):
+            sp = row.get('Saldo pendiente', np.nan)
+            dv = row.get('Dias_Vencimiento', np.nan)
+            if pd.notna(sp) and sp <= 0:
+                return 'Pagada'
+            if pd.notna(dv) and dv < 0 and pd.notna(sp) and sp > 0:
+                return 'Vencida'
+            if pd.notna(sp) and sp > 0:
+                return 'Por Vencer'
+            return 'Sin información'
 
-    # Filtros
-    filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada', 'Sin información'], key="t2_estado")
-    lista_clientes_cartera = sorted(dfc['Nombre cliente'].dropna().unique()) if 'Nombre cliente' in dfc.columns else []
-    filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera, key="t2_cliente")
-    lista_comerciales = sorted(dfc['COMERCIAL'].fillna('No disponible').unique()) if 'COMERCIAL' in dfc.columns else []
-    filtro_comercial = st.multiselect("Filtrar por Comercial:", options=lista_comerciales, key="t2_comercial")
+        dfc['Estado'] = dfc.apply(get_status, axis=1)
 
-    dfc_filtrada = dfc.copy()
-    if filtro_estado != 'Todas':
-        dfc_filtrada = dfc_filtrada[dfc_filtrada['Estado'] == filtro_estado]
-    if filtro_cliente and 'Nombre cliente' in dfc_filtrada.columns:
-        dfc_filtrada = dfc_filtrada[dfc_filtrada['Nombre cliente'].isin(filtro_cliente)]
-    if filtro_comercial and 'COMERCIAL' in dfc_filtrada.columns:
-        dfc_filtrada = dfc_filtrada[dfc_filtrada['COMERCIAL'].fillna('No disponible').isin(filtro_comercial)]
+        saldo_total = float(dfc.loc[dfc['Estado'] != 'Pagada', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+        saldo_vencido = float(dfc.loc[dfc['Estado'] == 'Vencida', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+        saldo_por_vencer = float(dfc.loc[dfc['Estado'] == 'Por Vencer', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
 
-    def style_venc(row):
-        if row['Estado'] == 'Vencida':
-            return ['background-color: #ffcccc'] * len(row)
-        dv = row.get('Dias_Vencimiento', np.nan)
-        if pd.notna(dv) and 0 <= dv <= 7:
-            return ['background-color: #fff3cd'] * len(row)
-        return [''] * len(row)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Saldo Total Pendiente", f"${saldo_total:,.0f}")
+        c2.metric("Total Vencido", f"${saldo_vencido:,.0f}", delta="Riesgo Alto", delta_color="inverse")
+        c3.metric("Total por Vencer", f"${saldo_por_vencer:,.0f}")
+        st.markdown("---")
 
-    cols_show = [c for c in [
-        'Nombre cliente', 'NÚMERO DE FACTURA', 'Fecha de Vencimiento',
-        'Saldo pendiente', 'Estado', 'Dias_Vencimiento', 'COMERCIAL'
-    ] if c in dfc_filtrada.columns]
+        # Filtros
+        filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada', 'Sin información'], key="t2_estado")
+        lista_clientes_cartera = sorted(dfc['Nombre cliente'].dropna().unique()) if 'Nombre cliente' in dfc.columns else []
+        filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera, key="t2_cliente")
+        lista_comerciales = sorted(dfc['COMERCIAL'].fillna('No disponible').unique()) if 'COMERCIAL' in dfc.columns else []
+        filtro_comercial = st.multiselect("Filtrar por Comercial:", options=lista_comerciales, key="t2_comercial")
 
-    st.dataframe(
-        dfc_filtrada[cols_show].style.apply(style_venc, axis=1).format({'Saldo pendiente': '${:,.0f}'}),
-        use_container_width=True
-    )
+        dfc_filtrada = dfc.copy()
+        if filtro_estado != 'Todas':
+            dfc_filtrada = dfc_filtrada[dfc_filtrada['Estado'] == filtro_estado]
+        if filtro_cliente and 'Nombre cliente' in dfc_filtrada.columns:
+            dfc_filtrada = dfc_filtrada[dfc_filtrada['Nombre cliente'].isin(filtro_cliente)]
+        if filtro_comercial and 'COMERCIAL' in dfc_filtrada.columns:
+            dfc_filtrada = dfc_filtrada[dfc_filtrada['COMERCIAL'].fillna('No disponible').isin(filtro_comercial)]
 
-    st.markdown("---")
-    if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
-        car = dfc[['Fecha de Vencimiento','Saldo pendiente']].copy()
-        car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
-        labels = ["Al día", "1-30", "31-60", "61-90", "91-180", "181-365", "+365"]
-        bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
-        car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
-        venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
-        st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos (Cartera)"),
-                        use_container_width=True, key="t2_aged")
+        def style_venc(row):
+            if row.get('Estado') == 'Vencida':
+                return ['background-color: #ffcccc'] * len(row)
+            dv = row.get('Dias_Vencimiento', np.nan)
+            if pd.notna(dv) and 0 <= dv <= 7:
+                return ['background-color: #fff3cd'] * len(row)
+            return [''] * len(row)
 
-    if 'COMERCIAL' in dfc.columns and 'Saldo pendiente' in dfc.columns:
-        por_com = dfc.groupby('COMERCIAL', as_index=False)['Saldo pendiente'].sum().sort_values('Saldo pendiente', ascending=False)
-        st.plotly_chart(px.bar(por_com, x='COMERCIAL', y='Saldo pendiente', title="Saldo pendiente por Comercial"),
-                        use_container_width=True, key="t2_by_salesrep")
+        cols_show = [c for c in [
+            'Nombre cliente', 'NÚMERO DE FACTURA', 'Fecha de Vencimiento',
+            'Saldo pendiente', 'Estado', 'Dias_Vencimiento', 'COMERCIAL'
+        ] if c in dfc_filtrada.columns]
+
+        st.dataframe(
+            dfc_filtrada[cols_show].style.apply(style_venc, axis=1).format({'Saldo pendiente': '${:,.0f}'}),
+            use_container_width=True
+        )
+
+        st.markdown("---")
+        if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
+            car = dfc[['Fecha de Vencimiento','Saldo pendiente']].copy()
+            car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
+            labels = ["Al día", "1-30", "31-60", "61-90", "91-180", "181-365", "+365"]
+            bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
+            car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
+            venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
+            st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos (Cartera)"),
+                            use_container_width=True, key="t2_aged")
+
+        if 'COMERCIAL' in dfc.columns and 'Saldo pendiente' in dfc.columns:
+            por_com = dfc.groupby('COMERCIAL', as_index=False)['Saldo pendiente'].sum().sort_values('Saldo pendiente', ascending=False)
+            st.plotly_chart(px.bar(por_com, x='COMERCIAL', y='Saldo pendiente', title="Saldo pendiente por Comercial"),
+                            use_container_width=True, key="t2_by_salesrep")
 
 # ---------------------------------------------------------------------------------
-# TAB 3: ANÁLISIS RFM + Recomendador ML (segmentos & día)
+# TAB 3: ANÁLISIS RFM + Recomendador ML
 # ---------------------------------------------------------------------------------
 with tab3:
     st.header("Análisis RFM + Recomendador ML")
@@ -693,6 +661,27 @@ with tab3:
                     Frecuencia=('NÚMERO DE FACTURA', 'nunique') if tiene_factura else ('FECHA VENTA','count'),
                     Monetario=('Total', 'sum')
                 ).reset_index()
+                def _safe_qcut_score(series, ascending, labels=[1,2,3,4,5]):
+                    s = series.copy()
+                    rk = s.rank(method='first', ascending=ascending)
+                    try:
+                        q = pd.qcut(rk, 5, labels=labels)
+                        return q.astype(int)
+                    except Exception:
+                        q = pd.cut(rk, bins=5, labels=labels, include_lowest=True, duplicates='drop')
+                        q = q.astype('float')
+                        fill_val = np.ceil(q.mean()) if not np.isnan(q.mean()) else 3
+                        return q.fillna(fill_val).astype(int)
+                def rfm_segment(row):
+                    r,f,m = row['R_Score'], row['F_Score'], row['M_Score']
+                    if r>=4 and f>=4 and m>=4: return "Champions"
+                    if r>=4 and f>=3: return "Loyal"
+                    if r>=3 and f>=3 and m>=3: return "Potential Loyalist"
+                    if r<=2 and f>=4: return "At Risk"
+                    if r<=2 and f<=2 and m<=2: return "Hibernating"
+                    if r>=3 and f<=2: return "New"
+                    return "Need Attention"
+
                 rfm['R_Score'] = _safe_qcut_score(rfm['Recencia'], ascending=True, labels=[5,4,3,2,1])
                 rfm['F_Score'] = _safe_qcut_score(rfm['Frecuencia'], ascending=False, labels=[1,2,3,4,5])
                 rfm['M_Score'] = _safe_qcut_score(rfm['Monetario'],  ascending=False, labels=[1,2,3,4,5])
@@ -815,7 +804,7 @@ with tab3:
                     return mapa_dw.get(idx)
                 candidatos['Dia_Contacto'] = candidatos.apply(mejor_dia, axis=1)
 
-                # Producto sugerido (más comprado históricamente)
+                # Producto sugerido
                 if 'Producto_Nombre' in ventas.columns and not ventas['Producto_Nombre'].isna().all():
                     top_prod_cliente = (ventas.groupby(['Cliente/Empresa', 'Producto_Nombre'])['Total']
                                         .sum().reset_index())
@@ -1047,7 +1036,7 @@ with tab4:
                     probas = best_estimator.predict(X).astype(float)
 
                 DS = X.copy()
-                DS['Cliente/Empresa'] = DS.index.astype(str)  # etiqueta para exportar
+                DS['Cliente/Empresa'] = DS.index.astype(str)
                 DS['Probabilidad_Compra'] = probas
                 top10 = DS[['Cliente/Empresa','Probabilidad_Compra']].nlargest(10, 'Probabilidad_Compra')
 
@@ -1067,7 +1056,7 @@ with tab4:
                 )
 
 # ---------------------------------------------------------------------------------
-# TAB 5: COTIZACIONES (usa hoja Productos; maneja "No aplica" y evita KeyError)
+# TAB 5: COTIZACIONES
 # ---------------------------------------------------------------------------------
 with tab5:
     st.header("🧾 Cotizaciones")
@@ -1076,18 +1065,11 @@ with tab5:
         st.warning("No se encontró la hoja 'Productos' con el formato esperado.")
         st.stop()
 
-    # Copia + asegurar columnas requeridas (robusto a variaciones en el Excel)
     catalog = ensure_product_numeric_cols(df_productos.copy())
 
-    # Relleno 0 SOLO para cálculo; la UI respeta 'No aplica'
-    catalog['_Precio_Medico_num']   = catalog['_Precio_Medico_num'].fillna(0.0)
-    catalog['_Precio_Paciente_num'] = catalog['_Precio_Paciente_num'].fillna(0.0)
-
-    # Si por alguna razón no se crearon banderas, créalas ahora
-    if 'NA_Medico' not in catalog.columns:
-        catalog['NA_Medico'] = catalog['_Precio_Medico_num'].isna() | (catalog['_Precio_Medico_num'] <= 0)
-    if 'NA_Paciente' not in catalog.columns:
-        catalog['NA_Paciente'] = catalog['_Precio_Paciente_num'].isna() | (catalog['_Precio_Paciente_num'] <= 0)
+    # Auxiliares para cálculo (si no hay precio -> 0 en cálculo, pero se informa)
+    catalog['Precio_Pro_num']    = catalog['Precio_Pro_num'].fillna(0.0)
+    catalog['Precio_Retail_num'] = catalog['Precio_Retail_num'].fillna(0.0)
 
     # Selector de productos (autocompletable)
     opciones = sorted(catalog['Producto_Nombre'].astype(str).unique().tolist())
@@ -1096,21 +1078,18 @@ with tab5:
         options=opciones, key="cot_sel"
     )
 
-    # Estado de cotización en sesión
     if "cot_items" not in st.session_state:
-        st.session_state["cot_items"] = {}  # { producto: {"qty": int, "price_type": "Medico"/"Paciente"} }
+        st.session_state["cot_items"] = {}  # { producto: {"qty": int, "price_type": "Pro"/"Retail"} }
 
     # Sincronizar selección con sesión
     for p in sel:
         if p not in st.session_state["cot_items"]:
             row_p = catalog.loc[catalog['Producto_Nombre'] == p].iloc[0]
-            # default según disponibilidad
-            if not bool(row_p['NA_Medico']) and bool(row_p['NA_Paciente']):
-                default_ptype = "Medico"
-            elif bool(row_p['NA_Medico']) and not bool(row_p['NA_Paciente']):
-                default_ptype = "Paciente"
-            elif not bool(row_p['NA_Medico']) and not bool(row_p['NA_Paciente']):
-                default_ptype = "Medico"
+            # default: si existe precio pro, usarlo; si no, retail; si no, None
+            if float(row_p['Precio_Pro_num']) > 0:
+                default_ptype = "Pro"
+            elif float(row_p['Precio_Retail_num']) > 0:
+                default_ptype = "Retail"
             else:
                 default_ptype = None
             st.session_state["cot_items"][p] = {"qty": 1, "price_type": default_ptype}
@@ -1127,7 +1106,6 @@ with tab5:
         total = 0.0
         rows = []
 
-        # Encabezados
         hdr = st.columns([4, 2, 3, 3, 3])
         hdr[0].markdown("**Producto**")
         hdr[1].markdown("**Cantidad**")
@@ -1137,28 +1115,18 @@ with tab5:
 
         for p in sel:
             row = catalog.loc[catalog['Producto_Nombre'] == p].iloc[0]
-            na_med = bool(row['NA_Medico'])
-            na_pac = bool(row['NA_Paciente'])
-
-            if na_med and na_pac:
-                valid_opts = []
-            elif na_med and not na_pac:
-                valid_opts = ["Paciente"]
-            elif not na_med and na_pac:
-                valid_opts = ["Medico"]
-            else:
-                valid_opts = ["Medico", "Paciente"]
+            valid_opts = []
+            if float(row['Precio_Pro_num']) > 0:    valid_opts.append("Pro")
+            if float(row['Precio_Retail_num']) > 0: valid_opts.append("Retail")
 
             c0, c1, c2, c3, c4 = st.columns([4, 2, 3, 3, 3])
             c0.write(p)
 
-            # cantidad
             qty_key = f"qty_{p}"
             qty_val = st.session_state["cot_items"][p]["qty"]
             qty = c1.number_input(" ", min_value=1, step=1, value=qty_val, key=qty_key)
             st.session_state["cot_items"][p]["qty"] = qty
 
-            # tipo de precio
             current_ptype = st.session_state["cot_items"][p]["price_type"]
             if current_ptype not in valid_opts and valid_opts:
                 current_ptype = valid_opts[0]
@@ -1174,12 +1142,11 @@ with tab5:
                 c2.warning("Sin precio disponible")
                 st.session_state["cot_items"][p]["price_type"] = None
 
-            # precio unitario numérico para cálculo (auxiliares robustas)
             punit = 0.0
-            if st.session_state["cot_items"][p]["price_type"] == "Medico":
-                punit = float(row.get('_Precio_Medico_num', 0.0))
-            elif st.session_state["cot_items"][p]["price_type"] == "Paciente":
-                punit = float(row.get('_Precio_Paciente_num', 0.0))
+            if st.session_state["cot_items"][p]["price_type"] == "Pro":
+                punit = float(row['Precio_Pro_num'])
+            elif st.session_state["cot_items"][p]["price_type"] == "Retail":
+                punit = float(row['Precio_Retail_num'])
 
             c3.metric(label=" ", value=f"${punit:,.0f}")
 
@@ -1212,3 +1179,95 @@ with tab5:
                 df_cot.style.format({"PrecioUnitario":"${:,.0f}","Subtotal":"${:,.0f}"}),
                 use_container_width=True
             )
+
+# ---------------------------------------------------------------------------------
+# TAB 6: INVENTARIO (nuevo)
+# ---------------------------------------------------------------------------------
+with tab6:
+    st.header("📦 Inventario (dinámico)")
+
+    if df_productos is None or df_productos.empty:
+        st.info("No se encontró la hoja 'Productos'.")
+        st.stop()
+
+    inv = ensure_product_numeric_cols(df_productos)
+
+    # Detección de columnas de stock
+    has_stock = 'Stock' in inv.columns
+    if not has_stock:
+        st.warning("No se detectó una columna de Stock/Existencias/Inventario en Productos. "
+                   "Puedes continuar con stock=0 o cargar una columna llamada 'Stock' en la hoja.")
+
+    # Parámetros de cálculo
+    colA, colB, colC, colD = st.columns(4)
+    ventana_ventas = colA.selectbox("Ventana de ventas (días)", [30, 60, 90, 120, 180], index=0, key="inv_win")
+    lead_time      = colB.number_input("Lead Time (días)", min_value=0, value=7, step=1, key="inv_lt")
+    safety_days    = colC.number_input("Safety Stock (días)", min_value=0, value=7, step=1, key="inv_ss")
+    usar_precio    = colD.selectbox("Valor inventario con:", ["Precio_Pro_num", "Precio_Retail_num"], index=0, key="inv_val")
+
+    # Ventas en ventana: tasa diaria por producto
+    max_fecha = df_ventas['FECHA VENTA'].max()
+    min_cut   = max_fecha - pd.Timedelta(days=ventana_ventas-1)
+    ventas_win = df_ventas[df_ventas['FECHA VENTA'] >= min_cut]
+
+    ventas_prod = (ventas_win.groupby('Producto_Nombre', as_index=False)['Total_num'].sum()
+                   .rename(columns={'Total_num':'Ventas_ventana'}))
+    dias_efectivos = max(1, (max_fecha.normalize() - min_cut.normalize()).days + 1)
+    ventas_prod['Venta_diaria'] = ventas_prod['Ventas_ventana'] / dias_efectivos
+
+    # Unir a inventario
+    inv2 = inv.merge(ventas_prod[['Producto_Nombre','Venta_diaria']], on='Producto_Nombre', how='left')
+    inv2['Venta_diaria'] = inv2['Venta_diaria'].fillna(0.0)
+    if 'Stock' not in inv2.columns:
+        inv2['Stock'] = 0.0
+    inv2['Stock'] = pd.to_numeric(inv2['Stock'], errors='coerce').fillna(0.0)
+
+    # Days of Cover y sugerencia de compra
+    inv2['Days_of_Cover'] = np.where(inv2['Venta_diaria'] > 0, inv2['Stock'] / inv2['Venta_diaria'], np.inf)
+    inv2['Demanda_LT']    = inv2['Venta_diaria'] * lead_time
+    inv2['Safety_Stock']  = inv2['Venta_diaria'] * safety_days
+    inv2['ROP']           = inv2['Demanda_LT'] + inv2['Safety_Stock']      # Reorder Point
+    inv2['Sugerido_Compra'] = np.maximum(0.0, inv2['ROP'] - inv2['Stock'])
+
+    # Valor inventario y KPIs
+    inv2['Valor_unit'] = inv2[usar_precio].fillna(0.0)
+    inv2['Valor_inventario'] = inv2['Stock'] * inv2['Valor_unit']
+
+    total_skus = inv2['Producto_Nombre'].nunique()
+    valor_total = float(inv2['Valor_inventario'].sum())
+    skus_bajo_cobertura = int((inv2['Days_of_Cover'] < (lead_time + safety_days)).sum())
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("SKUs", f"{total_skus:,}")
+    k2.metric("Valor total inventario", f"${valor_total:,.0f}")
+    k3.metric("SKUs con cobertura baja", f"{skus_bajo_cobertura:,}")
+
+    st.markdown("### Prioridades de reposición")
+    top_rep = inv2.sort_values(['Sugerido_Compra','Days_of_Cover'], ascending=[False, True]).head(50)
+    st.dataframe(
+        top_rep[['Producto_Nombre','Stock','Venta_diaria','Days_of_Cover','ROP','Sugerido_Compra','Valor_unit']]
+            .rename(columns={
+                'Producto_Nombre':'Producto',
+                'Venta_diaria':'Venta diaria',
+                'Days_of_Cover':'Días de cobertura',
+                'Sugerido_Compra':'Sugerido compra',
+                'Valor_unit': f'Valor unitario ({usar_precio})'
+            })
+            .style.format({
+                'Stock': '{:,.0f}',
+                'Venta diaria': '{:,.2f}',
+                'Días de cobertura': '{:,.1f}',
+                'ROP': '{:,.1f}',
+                'Sugerido compra': '{:,.0f}',
+                f'Valor unitario ({usar_precio})': '${:,.0f}'
+            }),
+        use_container_width=True
+    )
+
+    st.download_button(
+        "⬇️ Descargar tabla de inventario (CSV)",
+        data=inv2.to_csv(index=False).encode('utf-8'),
+        file_name=f"inventario_{pd.Timestamp.today().date()}.csv",
+        mime="text/csv",
+        key="inv_dl"
+    )
