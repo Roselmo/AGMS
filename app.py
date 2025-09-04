@@ -121,7 +121,7 @@ def load_data():
         df_ventas = pd.read_excel(file_path, sheet_name='Ventas', header=1)
         df_medicos = pd.read_excel(file_path, sheet_name='Lista Medicos')
         df_metadatos = pd.read_excel(file_path, sheet_name='Metadatos')
-        df_cartera = pd.read_excel(file_path, sheet_name='CarteraAgosto')
+        df_cartera = pd.read_excel(file_path, sheet_name='Cartera')
 
         # Ventas
         if 'FECHA VENTA' in df_ventas.columns:
