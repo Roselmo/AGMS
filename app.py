@@ -354,8 +354,18 @@ with tab1:
     dfv['FECHA VENTA'] = parse_fecha_col(dfv['FECHA VENTA'])
     dfv = dfv.dropna(subset=['FECHA VENTA'])
 
-    # Total a número
-    dfv['Total_num'] = dfv['Total'].apply(limpiar_moneda) if 'Total' in dfv.columns else 0.0
+    # Total numérico robusto
+    if 'Total' in dfv.columns:
+        dfv['Total_num'] = pd.to_numeric(
+            dfv['Total'].astype(str)
+                         .str.replace('$', '', regex=False)
+                         .str.replace('.', '', regex=False)   # miles
+                         .str.replace(',', '.', regex=False)  # decimales
+                         .str.strip(),
+            errors='coerce'
+        ).fillna(0.0)
+    else:
+        dfv['Total_num'] = 0.0
 
     # Normalizaciones útiles
     if 'Cliente/Empresa' in dfv.columns:
@@ -364,7 +374,8 @@ with tab1:
         import re
         def _base_name(s: str) -> str:
             s = str(s)
-            return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio', s, flags=re.IGNORECASE)[0].strip()
+            # corta antes de separadores comunes " - " o patrones con precio
+            return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio|\s-\s', s, flags=re.IGNORECASE)[0].strip()
         dfv['Producto_Nombre'] = dfv['Producto'].astype(str).apply(_base_name)
 
     # ✅ Derivadas de tiempo
@@ -372,8 +383,9 @@ with tab1:
     dfv['Mes_P']    = dfv['FECHA VENTA'].dt.to_period('M')
     dfv['Semana_P'] = dfv['FECHA VENTA'].dt.to_period('W')
     dfv['Día']      = dfv['FECHA VENTA'].dt.date
-    dfv['Mes']      = dfv['Mes_P'].astype(str)
-    dfv['Semana']   = dfv['Semana_P'].astype(str)
+    dfv['Mes']      = dfv['Mes_P'].astype(str)     # 'YYYY-MM'
+    dfv['Semana']   = dfv['Semana_P'].astype(str)  # 'YYYY-Wxx'
+    dfv['DiaSemana'] = dfv['FECHA VENTA'].dt.day_name()
 
     # ========================= KPIs Generales =========================
     total_ventas = float(dfv["Total_num"].sum())
@@ -382,7 +394,7 @@ with tab1:
     ticket_prom = total_ventas / total_transacciones if total_transacciones else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ventas Totales (desde 2024)", f"${total_ventas:,.0f}")
+    c1.metric("Ventas Totales (desde inicio)", f"${total_ventas:,.0f}")
     c2.metric("Transacciones", f"{total_transacciones:,}")
     c3.metric("Clientes Únicos", f"{clientes_unicos:,}")
     c4.metric("Ticket Promedio", f"${ticket_prom:,.0f}")
@@ -397,8 +409,8 @@ with tab1:
     with tab_r1:
         st.subheader("Evolución de Ventas")
 
-        # 🔍 Selector dinámico de rango temporal
-        min_date, max_date = dfv['FECHA VENTA'].min(), dfv['FECHA VENTA'].max()
+        # Selector de rango de fechas (por defecto: todo el histórico que exista)
+        min_date, max_date = dfv['FECHA VENTA'].min().date(), dfv['FECHA VENTA'].max().date()
         rango = st.date_input(
             "Selecciona rango de fechas",
             value=(min_date, max_date),
@@ -406,15 +418,20 @@ with tab1:
             max_value=max_date,
             key="t1_rango"
         )
-        if isinstance(rango, tuple):
-            dfv_rango = dfv[(dfv['FECHA VENTA'] >= pd.to_datetime(rango[0])) &
-                            (dfv['FECHA VENTA'] <= pd.to_datetime(rango[1]))]
+
+        if isinstance(rango, tuple) and len(rango) == 2:
+            fecha_ini = pd.to_datetime(rango[0])
+            fecha_fin = pd.to_datetime(rango[1]) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            dfv_rango = dfv[(dfv['FECHA VENTA'] >= fecha_ini) & (dfv['FECHA VENTA'] <= fecha_fin)]
         else:
             dfv_rango = dfv
 
-        serie = dfv_rango.groupby("FECHA VENTA", as_index=False)["Total_num"].sum()
+        serie = (dfv_rango
+                 .groupby(dfv_rango['FECHA VENTA'].dt.date, as_index=False)['Total_num']
+                 .sum()
+                 .rename(columns={'FECHA VENTA': 'Fecha'}))
         fig_line = px.line(
-            serie, x="FECHA VENTA", y="Total_num",
+            serie, x="Fecha", y="Total_num",
             markers=True, title="Evolución temporal de ventas"
         )
         st.plotly_chart(fig_line, use_container_width=True, key="t1_line")
@@ -422,19 +439,23 @@ with tab1:
         # 🔎 Consulta puntual por Año/Mes/Semana/Día
         with st.expander("🔎 Consultar valor por período (Año / Mes / Semana / Día)"):
             periodo = st.radio("Periodo", ["Año","Mes","Semana","Día"], horizontal=True, key="t1_periodo")
+
             if periodo == "Año":
                 opciones = sorted(dfv["Año"].unique())
                 sel = st.selectbox("Selecciona año", opciones, key="t1_sel_year")
                 valor = dfv.loc[dfv["Año"] == sel, "Total_num"].sum()
+
             elif periodo == "Mes":
-                opciones = sorted(dfv["Mes"].unique())
+                opciones = sorted(dfv["Mes"].unique())   # incluye meses recientes como 2025-08, 2025-09 si existen
                 sel = st.selectbox("Selecciona mes (YYYY-MM)", opciones, key="t1_sel_month")
                 valor = dfv.loc[dfv["Mes"] == sel, "Total_num"].sum()
+
             elif periodo == "Semana":
                 opciones = sorted(dfv["Semana"].unique())
                 sel = st.selectbox("Selecciona semana (YYYY-Wxx)", opciones, key="t1_sel_week")
                 valor = dfv.loc[dfv["Semana"] == sel, "Total_num"].sum()
-            else:
+
+            else:  # Día
                 opciones = sorted(dfv["Día"].unique())
                 sel = st.selectbox("Selecciona día", opciones, key="t1_sel_day")
                 valor = dfv.loc[dfv["Día"] == sel, "Total_num"].sum()
@@ -445,6 +466,7 @@ with tab1:
     with tab_r2:
         st.subheader("Análisis por Productos")
 
+        # Top-N dinámico
         if 'Producto_Nombre' in dfv.columns:
             colp1, colp2 = st.columns(2)
             with colp1:
@@ -458,29 +480,52 @@ with tab1:
             with colp2:
                 st.dataframe(prod, use_container_width=True)
 
-        # 🔎 Filtros dinámicos con tabla Productos (Tipo de piel y Condición)
+        # Filtros avanzados con la hoja Productos (nombres según tu archivo)
         if df_productos is not None and not df_productos.empty:
-            st.markdown("#### Filtros avanzados según características del producto")
-            tipos_piel = sorted(df_productos['Tipo_Piel'].dropna().unique())
-            conds = sorted(df_productos['Condicion'].dropna().unique())
-            f_piel = st.selectbox("Selecciona Tipo de Piel", ["(Todos)"] + tipos_piel, key="t1_piel")
-            f_cond = st.selectbox("Selecciona Condición", ["(Todos)"] + conds, key="t1_cond")
+            # Normaliza nombres de columnas de Productos a un estándar
+            prod_raw = df_productos.copy()
+            rename_map = {
+                'LISTA PRODUCTOS': 'Producto_Nombre',
+                'TIPO DE PIEL': 'Tipo_Piel',
+                'CONDICION': 'Condicion',
+                'PROFESIONA o RETAIL': 'Canal',
+                'PRECIO PRO': 'Precio_Pro',
+                'PRECIO RETAIL': 'Precio_Retail',
+                'Marca': 'Marca'
+            }
+            prod_raw.rename(columns={c: rename_map.get(c, c) for c in prod_raw.columns}, inplace=True)
 
-            prod_map = df_productos[['Producto_Nombre','Tipo_Piel','Condicion']].drop_duplicates()
-            dfv_merge = dfv.merge(prod_map, on="Producto_Nombre", how="left")
-            if f_piel != "(Todos)":
-                dfv_merge = dfv_merge[dfv_merge['Tipo_Piel'] == f_piel]
-            if f_cond != "(Todos)":
-                dfv_merge = dfv_merge[dfv_merge['Condicion'] == f_cond]
+            campos_ok = {'Producto_Nombre','Tipo_Piel','Condicion'}
+            if campos_ok.issubset(prod_raw.columns):
+                st.markdown("#### Filtros por características del producto")
+                tipos_piel = sorted(prod_raw['Tipo_Piel'].dropna().astype(str).unique())
+                conds      = sorted(prod_raw['Condicion'].dropna().astype(str).unique())
+                f_piel = st.selectbox("Selecciona Tipo de Piel", ["(Todos)"] + tipos_piel, key="t1_piel")
+                f_cond = st.selectbox("Selecciona Condición", ["(Todos)"] + conds, key="t1_cond")
 
-            if not dfv_merge.empty:
-                resumen = dfv_merge.groupby("Producto_Nombre", as_index=False)["Total_num"].sum().sort_values("Total_num", ascending=False)
-                fig = px.bar(resumen, x="Total_num", y="Producto_Nombre",
-                             orientation="h", title="Ventas filtradas por características")
-                st.plotly_chart(fig, use_container_width=True)
-                st.dataframe(resumen, use_container_width=True)
+                # Mapeo producto -> características
+                prod_map = prod_raw[['Producto_Nombre','Tipo_Piel','Condicion']].drop_duplicates()
+                dfv_merge = dfv.merge(prod_map, on="Producto_Nombre", how="left")
+
+                if f_piel != "(Todos)":
+                    dfv_merge = dfv_merge[dfv_merge['Tipo_Piel'] == f_piel]
+                if f_cond != "(Todos)":
+                    dfv_merge = dfv_merge[dfv_merge['Condicion'] == f_cond]
+
+                if not dfv_merge.empty:
+                    resumen = (dfv_merge.groupby("Producto_Nombre", as_index=False)["Total_num"]
+                                       .sum()
+                                       .sort_values("Total_num", ascending=False))
+                    fig2 = px.bar(resumen, x="Total_num", y="Producto_Nombre",
+                                  orientation="h",
+                                  title="Ventas filtradas por Tipo de Piel / Condición")
+                    fig2.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig2, use_container_width=True)
+                    st.dataframe(resumen, use_container_width=True)
+                else:
+                    st.info("No hay ventas para el filtro seleccionado.")
             else:
-                st.info("No hay ventas para el filtro seleccionado.")
+                st.info("La hoja 'Productos' no tiene las columnas esperadas para filtros (LISTA PRODUCTOS / TIPO DE PIEL / CONDICION).")
 
     # -------- Subpestaña: Clientes
     with tab_r3:
@@ -501,17 +546,14 @@ with tab1:
     # -------- Subpestaña: Mapa de calor
     with tab_r4:
         st.subheader("Mapa de calor (Día x Mes)")
-        heat = dfv.groupby([dfv['FECHA VENTA'].dt.to_period("M").astype(str),
-                            dfv['FECHA VENTA'].dt.day_name()],
-                           as_index=False)["Total_num"].sum()
-        heat_pivot = heat.pivot(index="FECHA VENTA", columns="FECHA VENTA", values="Total_num")
+        heat = (dfv.groupby(['DiaSemana','Mes'], as_index=False)['Total_num']
+                  .sum())
+        # Orden de días en inglés (por day_name)
         orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
-        heat["FECHA VENTA"] = pd.Categorical(heat["FECHA VENTA"], categories=orden_dias, ordered=True)
+        heat['DiaSemana'] = pd.Categorical(heat['DiaSemana'], categories=orden_dias, ordered=True)
+        heat_pivot = heat.pivot(index='DiaSemana', columns='Mes', values='Total_num').fillna(0)
         st.plotly_chart(
-            px.imshow(
-                heat.pivot(index="FECHA VENTA", columns="FECHA VENTA", values="Total_num").fillna(0),
-                aspect="auto", title="Heatmap de Ventas (día x mes)"
-            ),
+            px.imshow(heat_pivot, aspect="auto", title="Heatmap de Ventas (Día de semana x Mes)"),
             use_container_width=True
         )
 # ---------------------------------------------------------------------------------
