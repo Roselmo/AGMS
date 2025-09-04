@@ -423,98 +423,139 @@ with tab1:
                             use_container_width=True)
 
 # ---------------------------------------------------------------------------------
-# TAB 2: CARTERA
+# TAB 2: GESTIÓN DE CARTERA (lee Cartera y une COMERCIAL por factura)
 # ---------------------------------------------------------------------------------
 with tab2:
     st.header("Gestión de Cartera")
+
     if df_cartera is None or df_cartera.empty:
         st.info("No se encontró la hoja 'Cartera'.")
+        st.stop()
+
+    dfc = df_cartera.copy()
+
+    # Normalización de nombres
+    rename_map = {
+        'Numero de Factura': 'NÚMERO DE FACTURA',
+        'NUMERO DE FACTURA': 'NÚMERO DE FACTURA',
+        'Num Factura': 'NÚMERO DE FACTURA',
+        'Cliente': 'Nombre cliente',
+        'CLIENTE': 'Nombre cliente',
+        'Fecha Vencimiento': 'Fecha de Vencimiento',
+        'SALDO PENDIENTE': 'Saldo pendiente'
+    }
+    dfc.rename(columns={c: rename_map.get(c, c) for c in dfc.columns}, inplace=True)
+
+    # Fechas y montos
+    if 'Fecha de Vencimiento' in dfc.columns:
+        dfc['Fecha de Vencimiento'] = pd.to_datetime(dfc['Fecha de Vencimiento'], errors='coerce')
+
+    for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
+        if col in dfc.columns:
+            dfc[col] = dfc[col].apply(limpiar_moneda).fillna(0.0)
+
+    # Unir COMERCIAL desde ventas por NÚMERO DE FACTURA (si existe)
+    if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
+        dfc['NÚMERO DE FACTURA'] = dfc['NÚMERO DE FACTURA'].astype(str).str.strip()
+
+        dfv_fact = df_ventas[['NÚMERO DE FACTURA']].copy()
+        dfv_fact['NÚMERO DE FACTURA'] = dfv_fact['NÚMERO DE FACTURA'].astype(str).str.strip()
+        # Si existe COMERCIAL en ventas, úsalo; si no, crea columna vacía
+        if 'COMERCIAL' in df_ventas.columns:
+            dfv_fact = dfv_fact.join(df_ventas['COMERCIAL'])
+        else:
+            dfv_fact['COMERCIAL'] = np.nan
+
+        dfc = dfc.merge(dfv_fact.drop_duplicates(subset=['NÚMERO DE FACTURA']),
+                        on='NÚMERO DE FACTURA', how='left')
+
+    # ✅ Crear/asegurar columna COMERCIAL correctamente (evita AttributeError)
+    if 'COMERCIAL' not in dfc.columns:
+        dfc['COMERCIAL'] = "No disponible"
     else:
-        dfc = df_cartera.copy()
-        if 'Fecha de Vencimiento' in dfc.columns:
-            dfc['Fecha de Vencimiento'] = pd.to_datetime(dfc['Fecha de Vencimiento'], errors='coerce')
-        for col in ['Deuda por cobrar', 'Cantidad Abonada', 'Saldo pendiente']:
-            if col in dfc.columns:
-                dfc[col] = dfc[col].apply(limpiar_moneda).fillna(0.0)
+        dfc['COMERCIAL'] = dfc['COMERCIAL'].fillna("No disponible").astype(str)
 
-        if 'NÚMERO DE FACTURA' in dfc.columns and 'NÚMERO DE FACTURA' in df_ventas.columns:
-            dfc['NÚMERO DE FACTURA'] = dfc['NÚMERO DE FACTURA'].astype(str).str.strip()
-            dfv_fact = df_ventas[['NÚMERO DE FACTURA']].copy()
-            dfv_fact['COMERCIAL'] = df_ventas['COMERCIAL'] if 'COMERCIAL' in df_ventas.columns else np.nan
-            dfv_fact['NÚMERO DE FACTURA'] = dfv_fact['NÚMERO DE FACTURA'].astype(str).str.strip()
-            dfc = dfc.merge(dfv_fact.drop_duplicates(), on='NÚMERO DE FACTURA', how='left')
-        else:
-            dfc['COMERCIAL'] = dfc.get('COMERCIAL', "No disponible").fillna("No disponible")
+    # Días a vencimiento y estado
+    hoy = datetime.now()
+    if 'Fecha de Vencimiento' in dfc.columns:
+        dfc['Dias_Vencimiento'] = (dfc['Fecha de Vencimiento'] - hoy).dt.days
+    else:
+        dfc['Dias_Vencimiento'] = np.nan
 
-        hoy = datetime.now()
-        if 'Fecha de Vencimiento' in dfc.columns:
-            dfc['Dias_Vencimiento'] = (dfc['Fecha de Vencimiento'] - hoy).dt.days
-        else:
-            dfc['Dias_Vencimiento'] = np.nan
+    def get_status(row):
+        sp = row.get('Saldo pendiente', np.nan)
+        dv = row.get('Dias_Vencimiento', np.nan)
+        if pd.notna(sp) and sp <= 0:
+            return 'Pagada'
+        if pd.notna(dv) and dv < 0 and pd.notna(sp) and sp > 0:
+            return 'Vencida'
+        if pd.notna(sp) and sp > 0:
+            return 'Por Vencer'
+        return 'Sin información'
 
-        def get_status(row):
-            sp = row.get('Saldo pendiente', np.nan)
-            dv = row.get('Dias_Vencimiento', np.nan)
-            if pd.notna(sp) and sp <= 0: return 'Pagada'
-            if pd.notna(dv) and dv < 0 and pd.notna(sp) and sp > 0: return 'Vencida'
-            if pd.notna(sp) and sp > 0: return 'Por Vencer'
-            return 'Sin información'
-        dfc['Estado'] = dfc.apply(get_status, axis=1)
+    dfc['Estado'] = dfc.apply(get_status, axis=1)
 
-        saldo_total = float(dfc.loc[dfc['Estado'] != 'Pagada', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
-        saldo_vencido = float(dfc.loc[dfc['Estado'] == 'Vencida', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
-        saldo_por_vencer = float(dfc.loc[dfc['Estado'] == 'Por Vencer', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+    # KPIs
+    saldo_total = float(dfc.loc[dfc['Estado'] != 'Pagada', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+    saldo_vencido = float(dfc.loc[dfc['Estado'] == 'Vencida', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
+    saldo_por_vencer = float(dfc.loc[dfc['Estado'] == 'Por Vencer', 'Saldo pendiente'].sum()) if 'Saldo pendiente' in dfc.columns else 0.0
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Saldo Total Pendiente", f"${saldo_total:,.0f}")
-        c2.metric("Total Vencido", f"${saldo_vencido:,.0f}", delta="Riesgo Alto", delta_color="inverse")
-        c3.metric("Total por Vencer", f"${saldo_por_vencer:,.0f}")
-        st.markdown("---")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Saldo Total Pendiente", f"${saldo_total:,.0f}")
+    c2.metric("Total Vencido", f"${saldo_vencido:,.0f}", delta="Riesgo Alto", delta_color="inverse")
+    c3.metric("Total por Vencer", f"${saldo_por_vencer:,.0f}")
+    st.markdown("---")
 
-        filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada', 'Sin información'], key="t2_estado")
-        lista_clientes_cartera = sorted(dfc['Nombre cliente'].dropna().unique()) if 'Nombre cliente' in dfc.columns else []
-        filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera, key="t2_cliente")
-        lista_comerciales = sorted(dfc['COMERCIAL'].fillna('No disponible').unique()) if 'COMERCIAL' in dfc.columns else []
-        filtro_comercial = st.multiselect("Filtrar por Comercial:", options=lista_comerciales, key="t2_comercial")
+    # Filtros
+    filtro_estado = st.selectbox("Filtrar por Estado:", options=['Todas', 'Vencida', 'Por Vencer', 'Pagada', 'Sin información'], key="t2_estado")
+    lista_clientes_cartera = sorted(dfc['Nombre cliente'].dropna().unique()) if 'Nombre cliente' in dfc.columns else []
+    filtro_cliente = st.multiselect("Filtrar por Cliente:", options=lista_clientes_cartera, key="t2_cliente")
+    lista_comerciales = sorted(dfc['COMERCIAL'].fillna('No disponible').unique()) if 'COMERCIAL' in dfc.columns else []
+    filtro_comercial = st.multiselect("Filtrar por Comercial:", options=lista_comerciales, key="t2_comercial")
 
-        dfc_filtrada = dfc.copy()
-        if filtro_estado != 'Todas':
-            dfc_filtrada = dfc_filtrada[dfc_filtrada['Estado'] == filtro_estado]
-        if filtro_cliente and 'Nombre cliente' in dfc_filtrada.columns:
-            dfc_filtrada = dfc_filtrada[dfc_filtrada['Nombre cliente'].isin(filtro_cliente)]
-        if filtro_comercial and 'COMERCIAL' in dfc_filtrada.columns:
-            dfc_filtrada = dfc_filtrada[dfc_filtrada['COMERCIAL'].fillna('No disponible').isin(filtro_comercial)]
+    dfc_filtrada = dfc.copy()
+    if filtro_estado != 'Todas':
+        dfc_filtrada = dfc_filtrada[dfc_filtrada['Estado'] == filtro_estado]
+    if filtro_cliente and 'Nombre cliente' in dfc_filtrada.columns:
+        dfc_filtrada = dfc_filtrada[dfc_filtrada['Nombre cliente'].isin(filtro_cliente)]
+    if filtro_comercial and 'COMERCIAL' in dfc_filtrada.columns:
+        dfc_filtrada = dfc_filtrada[dfc_filtrada['COMERCIAL'].isin(filtro_comercial)]
 
-        def style_venc(row):
-            if row.get('Estado') == 'Vencida': return ['background-color: #ffcccc'] * len(row)
-            dv = row.get('Dias_Vencimiento', np.nan)
-            if pd.notna(dv) and 0 <= dv <= 7: return ['background-color: #fff3cd'] * len(row)
-            return [''] * len(row)
+    def style_venc(row):
+        if row.get('Estado') == 'Vencida':
+            return ['background-color: #ffcccc'] * len(row)
+        dv = row.get('Dias_Vencimiento', np.nan)
+        if pd.notna(dv) and 0 <= dv <= 7:
+            return ['background-color: #fff3cd'] * len(row)
+        return [''] * len(row)
 
-        cols_show = [c for c in [
-            'Nombre cliente','NÚMERO DE FACTURA','Fecha de Vencimiento',
-            'Saldo pendiente','Estado','Dias_Vencimiento','COMERCIAL'
-        ] if c in dfc_filtrada.columns]
+    cols_show = [c for c in [
+        'Nombre cliente', 'NÚMERO DE FACTURA', 'Fecha de Vencimiento',
+        'Saldo pendiente', 'Estado', 'Dias_Vencimiento', 'COMERCIAL'
+    ] if c in dfc_filtrada.columns]
 
-        st.dataframe(
-            dfc_filtrada[cols_show].style.apply(style_venc, axis=1).format({'Saldo pendiente': '${:,.0f}'}),
-            use_container_width=True
-        )
+    st.dataframe(
+        dfc_filtrada[cols_show].style.apply(style_venc, axis=1).format({'Saldo pendiente': '${:,.0f}'}),
+        use_container_width=True
+    )
 
-        st.markdown("---")
-        if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
-            car = dfc[['Fecha de Vencimiento','Saldo pendiente']].copy()
-            car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
-            labels = ["Al día","1-30","31-60","61-90","91-180","181-365","+365"]
-            bins = [-float("inf"),0,30,60,90,180,365,float("inf")]
-            car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
-            venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
-            safe_bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos (Cartera)", key="t2_aged")
+    st.markdown("---")
+    if {'Fecha de Vencimiento','Saldo pendiente'}.issubset(dfc.columns):
+        car = dfc[['Fecha de Vencimiento','Saldo pendiente']].copy()
+        car['DIAS_VENCIDOS'] = (pd.Timestamp.today().normalize() - car['Fecha de Vencimiento']).dt.days
+        labels = ["Al día", "1-30", "31-60", "61-90", "91-180", "181-365", "+365"]
+        bins = [-float("inf"), 0, 30, 60, 90, 180, 365, float("inf")]
+        car["Rango"] = pd.cut(car["DIAS_VENCIDOS"], bins=bins, labels=labels, ordered=True)
+        venc = car.groupby("Rango", as_index=False).agg(Saldo=("Saldo pendiente","sum"))
+        st.plotly_chart(px.bar(venc, x="Rango", y="Saldo", title="Antigüedad de saldos (Cartera)"),
+                        use_container_width=True, key="t2_aged")
 
-        if 'COMERCIAL' in dfc.columns and 'Saldo pendiente' in dfc.columns:
-            por_com = dfc.groupby('COMERCIAL', as_index=False)['Saldo pendiente'].sum().sort_values('Saldo pendiente', ascending=False)
-            safe_bar(por_com, x='COMERCIAL', y='Saldo pendiente', title="Saldo pendiente por Comercial", key="t2_by_salesrep")
-
+    if 'COMERCIAL' in dfc.columns and 'Saldo pendiente' in dfc.columns:
+        por_com = (dfc.groupby('COMERCIAL', as_index=False)['Saldo pendiente']
+                     .sum().sort_values('Saldo pendiente', ascending=False))
+        st.plotly_chart(px.bar(por_com, x='COMERCIAL', y='Saldo pendiente', title="Saldo pendiente por Comercial"),
+                        use_container_width=True, key="t2_by_salesrep")
+        
 # ---------------------------------------------------------------------------------
 # TAB 3: RFM + Recomendador (igual que antes, sin cambios en gráficas de px)
 # ---------------------------------------------------------------------------------
