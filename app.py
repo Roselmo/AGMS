@@ -304,7 +304,6 @@ with tab1:
     def _base_name(s: str) -> str:
         if not isinstance(s, str):
             return ""
-        # corta cuando aparezca " - $..." o " / $..." o " - PRECIO..."
         return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio', s.strip(), flags=re.IGNORECASE)[0].strip()
 
     def _norm(s):
@@ -313,24 +312,33 @@ with tab1:
         return s.strip().lower().replace('  ', ' ')
 
     def parse_fecha_col(col):
-        """Parsea FECHA VENTA combinando:
-           1) serial de Excel (número)
-           2) texto día-primero
-           3) texto año-primero
+        """
+        Convierte una columna a datetime soportando:
+        - Textos dd/mm/yyyy o yyyy-mm-dd
+        - Seriales de Excel (número de días desde 1899-12-30)
         """
         s = pd.Series(col)
-        # 1) serial Excel
-        dt_serial = pd.to_datetime(s.where(s.apply(lambda x: isinstance(x, (int, float))), pd.NA),
-                                   unit='d', origin='1899-12-30', errors='coerce')
-        # 2) texto día-primero
-        dt_dayfirst = pd.to_datetime(s.where(~s.apply(lambda x: isinstance(x, (int, float))), s.astype(str)),
-                                     dayfirst=True, errors='coerce', infer_datetime_format=True)
-        # 3) texto año-primero
-        dt_yearfirst = pd.to_datetime(s.where(~s.apply(lambda x: isinstance(x, (int, float))), s.astype(str)),
-                                      yearfirst=True, errors='coerce', infer_datetime_format=True)
-        # coalesce
-        dt = dt_serial.fillna(dt_dayfirst).fillna(dt_yearfirst)
-        return dt
+
+        # 1) Texto día-primero
+        dt_dayfirst = pd.to_datetime(
+            s.astype(str),
+            dayfirst=True, errors='coerce', infer_datetime_format=True
+        )
+
+        # 2) Texto año-primero (fallback)
+        dt_yearfirst = pd.to_datetime(
+            s.astype(str),
+            yearfirst=True, errors='coerce', infer_datetime_format=True
+        )
+
+        # 3) Serial de Excel (solo para valores numéricos)
+        nums = pd.to_numeric(s, errors='coerce')
+        dt_serial = pd.to_datetime(
+            nums, unit='d', origin='1899-12-30', errors='coerce'
+        )
+
+        # Prioridad: texto día-primero -> texto año-primero -> serial Excel
+        return dt_dayfirst.combine_first(dt_yearfirst).combine_first(dt_serial)
 
     # ----------------- Ventas: fechas + totales -----------------
     dfv = df_ventas.copy()
@@ -342,7 +350,7 @@ with tab1:
     dfv['FECHA VENTA'] = parse_fecha_col(dfv['FECHA VENTA'])
     dfv = dfv.dropna(subset=['FECHA VENTA'])
 
-    # TOTAL robusto para meses recientes
+    # TOTAL robusto
     dfv['Total_num'] = dfv['Total'].apply(limpiar_moneda)
 
     # Cliente y Producto base
@@ -353,14 +361,12 @@ with tab1:
         dfv['Producto_Nombre'] = dfv['Producto_Nombre'].astype(str).apply(_base_name)
 
     # Derivadas de tiempo SIEMPRE desde FECHA VENTA ya parseada
-    dfv['Año']    = dfv['FECHA VENTA'].dt.year
-    dfv['Mes_P']  = dfv['FECHA VENTA'].dt.to_period('M')     # Period('YYYY-MM')
-    dfv['Semana_P'] = dfv['FECHA VENTA'].dt.to_period('W')   # Period('YYYY-Wxx')
-    dfv['Día']    = dfv['FECHA VENTA'].dt.date
-
-    # Para mostrar como texto cuando se requiera
-    dfv['Mes']    = dfv['Mes_P'].astype(str)
-    dfv['Semana'] = dfv['Semana_P'].astype(str)
+    dfv['Año']       = dfv['FECHA VENTA'].dt.year
+    dfv['Mes_P']     = dfv['FECHA VENTA'].dt.to_period('M')   # Period('YYYY-MM')
+    dfv['Semana_P']  = dfv['FECHA VENTA'].dt.to_period('W')   # Period('YYYY-Wxx')
+    dfv['Día']       = dfv['FECHA VENTA'].dt.date
+    dfv['Mes']       = dfv['Mes_P'].astype(str)
+    dfv['Semana']    = dfv['Semana_P'].astype(str)
 
     # Rango total disponible
     fecha_min = dfv['FECHA VENTA'].min().date()
@@ -370,10 +376,10 @@ with tab1:
     inicio_2024 = pd.Timestamp(2024, 1, 1)
     mask_2024_hoy = dfv['FECHA VENTA'].between(inicio_2024, dfv['FECHA VENTA'].max(), inclusive="both")
 
-    ventas_totales = float(dfv.loc[mask_2024_hoy, 'Total_num'].sum())
-    transacciones  = int(mask_2024_hoy.sum())
-    clientes_unicos = int(dfv.loc[mask_2024_hoy, 'Cliente/Empresa'].nunique())
-    ticket_prom = ventas_totales / transacciones if transacciones else 0.0
+    ventas_totales   = float(dfv.loc[mask_2024_hoy, 'Total_num'].sum())
+    transacciones    = int(mask_2024_hoy.sum())
+    clientes_unicos  = int(dfv.loc[mask_2024_hoy, 'Cliente/Empresa'].nunique())
+    ticket_prom      = ventas_totales / transacciones if transacciones else 0.0
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Ventas totales (desde 2024)", f"${ventas_totales:,.0f}")
