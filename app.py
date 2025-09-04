@@ -294,51 +294,81 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ---------------------------------------------------------------------------------
-# TAB 1: ANÁLISIS DE VENTAS  (corregido y robusto para hoja Productos)
+# TAB 1: ANÁLISIS DE VENTAS (fechas robustas + consulta por período + productos/clientes)
 # ---------------------------------------------------------------------------------
 with tab1:
     st.header("Análisis General de Ventas")
 
-    # --------- Normalización robusta del dataframe de ventas ----------
-    dfv = df_ventas.copy()
-
-    # Fecha
-    if 'FECHA VENTA' not in dfv.columns:
-        st.warning("No se encuentra la columna 'FECHA VENTA' en la hoja Ventas.")
-        st.stop()
-    dfv['FECHA VENTA'] = pd.to_datetime(dfv['FECHA VENTA'], errors='coerce')
-    dfv = dfv.dropna(subset=['FECHA VENTA'])
-
-    # Total como número real aunque venga como "$ 315.000" (esto arregla meses recientes)
-    dfv['Total_num'] = dfv['Total'].apply(limpiar_moneda)
-
-    # Cliente y Producto base (nombre sin la parte de precio)
-    dfv['Cliente/Empresa'] = dfv.get('Cliente/Empresa', '').astype(str).str.strip().str.upper()
-
-    import re
+    # ----------------- Helpers internos -----------------
+    import re, unicodedata
     def _base_name(s: str) -> str:
         if not isinstance(s, str):
             return ""
         # corta cuando aparezca " - $..." o " / $..." o " - PRECIO..."
         return re.split(r'\s[-/]\s?\$|\s[-/]\s?precio', s.strip(), flags=re.IGNORECASE)[0].strip()
 
+    def _norm(s):
+        s = str(s)
+        s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+        return s.strip().lower().replace('  ', ' ')
+
+    def parse_fecha_col(col):
+        """Parsea FECHA VENTA combinando:
+           1) serial de Excel (número)
+           2) texto día-primero
+           3) texto año-primero
+        """
+        s = pd.Series(col)
+        # 1) serial Excel
+        dt_serial = pd.to_datetime(s.where(s.apply(lambda x: isinstance(x, (int, float))), pd.NA),
+                                   unit='d', origin='1899-12-30', errors='coerce')
+        # 2) texto día-primero
+        dt_dayfirst = pd.to_datetime(s.where(~s.apply(lambda x: isinstance(x, (int, float))), s.astype(str)),
+                                     dayfirst=True, errors='coerce', infer_datetime_format=True)
+        # 3) texto año-primero
+        dt_yearfirst = pd.to_datetime(s.where(~s.apply(lambda x: isinstance(x, (int, float))), s.astype(str)),
+                                      yearfirst=True, errors='coerce', infer_datetime_format=True)
+        # coalesce
+        dt = dt_serial.fillna(dt_dayfirst).fillna(dt_yearfirst)
+        return dt
+
+    # ----------------- Ventas: fechas + totales -----------------
+    dfv = df_ventas.copy()
+    if 'FECHA VENTA' not in dfv.columns:
+        st.warning("No se encuentra la columna 'FECHA VENTA' en la hoja Ventas.")
+        st.stop()
+
+    # FECHAS robustas
+    dfv['FECHA VENTA'] = parse_fecha_col(dfv['FECHA VENTA'])
+    dfv = dfv.dropna(subset=['FECHA VENTA'])
+
+    # TOTAL robusto para meses recientes
+    dfv['Total_num'] = dfv['Total'].apply(limpiar_moneda)
+
+    # Cliente y Producto base
+    dfv['Cliente/Empresa'] = dfv.get('Cliente/Empresa', '').astype(str).str.strip().str.upper()
     if 'Producto_Nombre' not in dfv.columns and 'Producto' in dfv.columns:
         dfv['Producto_Nombre'] = dfv['Producto'].astype(str).apply(_base_name)
     elif 'Producto_Nombre' in dfv.columns:
         dfv['Producto_Nombre'] = dfv['Producto_Nombre'].astype(str).apply(_base_name)
 
-    # Derivadas de tiempo
+    # Derivadas de tiempo SIEMPRE desde FECHA VENTA ya parseada
     dfv['Año']    = dfv['FECHA VENTA'].dt.year
-    dfv['Mes']    = dfv['FECHA VENTA'].dt.to_period('M').astype(str)         # YYYY-MM
-    dfv['Semana'] = dfv['FECHA VENTA'].dt.to_period('W').astype(str)         # YYYY-Wxx
+    dfv['Mes_P']  = dfv['FECHA VENTA'].dt.to_period('M')     # Period('YYYY-MM')
+    dfv['Semana_P'] = dfv['FECHA VENTA'].dt.to_period('W')   # Period('YYYY-Wxx')
     dfv['Día']    = dfv['FECHA VENTA'].dt.date
 
-    # --------- KPIs (desde 2024-01-01 a la última fecha disponible) ----------
+    # Para mostrar como texto cuando se requiera
+    dfv['Mes']    = dfv['Mes_P'].astype(str)
+    dfv['Semana'] = dfv['Semana_P'].astype(str)
+
+    # Rango total disponible
     fecha_min = dfv['FECHA VENTA'].min().date()
     fecha_max = dfv['FECHA VENTA'].max().date()
 
-    inicio_2024 = pd.to_datetime("2024-01-01")
-    mask_2024_hoy = dfv['FECHA VENTA'] >= inicio_2024
+    # KPIs desde 2024-01-01 hasta la ÚLTIMA FECHA DISPONIBLE
+    inicio_2024 = pd.Timestamp(2024, 1, 1)
+    mask_2024_hoy = dfv['FECHA VENTA'].between(inicio_2024, dfv['FECHA VENTA'].max(), inclusive="both")
 
     ventas_totales = float(dfv.loc[mask_2024_hoy, 'Total_num'].sum())
     transacciones  = int(mask_2024_hoy.sum())
@@ -362,7 +392,7 @@ with tab1:
     with tab_r1:
         st.subheader("Evolución temporal")
 
-        # Rango de fechas dinámico para la gráfica
+        # Rango de fechas para la gráfica
         colR1, colR2, _ = st.columns([2, 2, 2])
         default_ini = max(inicio_2024.date(), fecha_min)
         rango = colR1.date_input(
@@ -375,17 +405,18 @@ with tab1:
         else:
             f_ini, f_fin = pd.to_datetime(default_ini), pd.to_datetime(fecha_max)
 
-        # Agrupación para la curva (propia de esta gráfica)
         gran_graf = colR2.selectbox("Agrupar por", ["Día", "Semana", "Mes"], index=0, key="t1_grp_graf")
 
-        df_line = dfv[(dfv['FECHA VENTA'] >= f_ini) & (dfv['FECHA VENTA'] <= f_fin)].copy()
+        df_line = dfv[dfv['FECHA VENTA'].between(f_ini, f_fin, inclusive="both")].copy()
         if gran_graf == "Día":
             serie = df_line.groupby('Día', as_index=False)['Total_num'].sum().rename(columns={'Día': 'Periodo'})
             serie['Periodo'] = pd.to_datetime(serie['Periodo'])
         elif gran_graf == "Semana":
-            serie = df_line.groupby('Semana', as_index=False)['Total_num'].sum().rename(columns={'Semana': 'Periodo'})
+            serie = df_line.groupby('Semana_P', as_index=False)['Total_num'].sum().rename(columns={'Semana_P': 'Periodo'})
+            serie['Periodo'] = serie['Periodo'].astype(str)
         else:  # Mes
-            serie = df_line.groupby('Mes', as_index=False)['Total_num'].sum().rename(columns={'Mes': 'Periodo'})
+            serie = df_line.groupby('Mes_P', as_index=False)['Total_num'].sum().rename(columns={'Mes_P': 'Periodo'})
+            serie['Periodo'] = serie['Periodo'].astype(str)
 
         if PLOTLY_OK and not serie.empty:
             st.plotly_chart(
@@ -399,16 +430,8 @@ with tab1:
     with tab_r3:
         st.subheader("Análisis por productos (filtrado por atributos del catálogo)")
 
-        # ------- Normalización robusta de hoja Productos -------
+        # Normalización de la hoja Productos
         prod_raw = df_productos.copy()
-
-        # Helper para localizar columnas ignorando mayúsculas/espacios/acentos
-        import unicodedata
-        def _norm(s):
-            s = str(s)
-            s = ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-            return s.strip().lower().replace('  ', ' ').replace('\t', ' ').replace('\n', ' ')
-
         cols_norm = {_norm(c): c for c in prod_raw.columns}
 
         def find_col(candidates):
@@ -416,7 +439,6 @@ with tab1:
                 key = _norm(cand)
                 if key in cols_norm:
                     return cols_norm[key]
-            # búsqueda por contains (por si hay espacios/sufijos)
             for k_norm, k_real in cols_norm.items():
                 if any(_norm(c) in k_norm for c in candidates):
                     return k_real
@@ -427,29 +449,20 @@ with tab1:
         col_cond    = find_col(["CONDICION", "CONDICIÓN"])
         col_marca   = find_col(["MARCA"])
 
-        # Construimos columnas estándar si existen
-        if col_lista:
-            prod_raw['Lista'] = prod_raw[col_lista].astype(str)
-        else:
-            prod_raw['Lista'] = ""  # evita KeyError aunque falte
+        prod_raw['Lista'] = prod_raw[col_lista].astype(str) if col_lista else ""
+        if col_tipo:  prod_raw['Tipo_Piel'] = prod_raw[col_tipo].astype(str)
+        if col_cond:  prod_raw['Condicion'] = prod_raw[col_cond].astype(str)
+        if col_marca: prod_raw['Marca'] = prod_raw[col_marca].astype(str)
 
-        if col_tipo:
-            prod_raw['Tipo_Piel'] = prod_raw[col_tipo].astype(str)
-        if col_cond:
-            prod_raw['Condicion'] = prod_raw[col_cond].astype(str)
-        if col_marca:
-            prod_raw['Marca'] = prod_raw[col_marca].astype(str)
-
-        # Base de nombre para enlazar con ventas
         prod_raw['Producto_Base'] = prod_raw['Lista'].astype(str).apply(_base_name)
 
-        # Enlace ventas <-> catálogo por nombre base
+        # Link ventas-catalogo por nombre base
         ventas_cat = dfv.merge(
             prod_raw[['Producto_Base', 'Tipo_Piel', 'Condicion', 'Marca']],
             left_on='Producto_Nombre', right_on='Producto_Base', how='left'
         )
 
-        # Filtros de producto (SIN "Canal")
+        # Filtros (tipo de piel / condición). Se eliminó "Canal".
         cA, cB = st.columns(2)
         tipos  = sorted(ventas_cat['Tipo_Piel'].dropna().unique().tolist())
         conds  = sorted(ventas_cat['Condicion'].dropna().unique().tolist())
@@ -463,10 +476,8 @@ with tab1:
         if cond_sel:
             dfp = dfp[dfp['Condicion'].isin(cond_sel)]
 
-        # Top-N configurable
         top_n = st.selectbox("Top N", [5, 10, 15, 20, 30], index=1, key="t1_prod_topn")
 
-        # Top productos por ventas
         gprod = (dfp.groupby('Producto_Nombre', as_index=False)['Total_num'].sum()
                    .sort_values('Total_num', ascending=False).head(top_n))
 
@@ -479,7 +490,6 @@ with tab1:
             )
         c2p.dataframe(gprod.rename(columns={'Total_num': 'Ventas ($)'}), use_container_width=True)
 
-        # Ventas por marca (para el mismo filtro)
         gmarca = (dfp.groupby('Marca', as_index=False)['Total_num'].sum()
                     .sort_values('Total_num', ascending=False))
         if PLOTLY_OK and not gmarca.empty:
@@ -511,7 +521,8 @@ with tab1:
 
         work = dfv.copy()
         work['DiaSemana'] = work['FECHA VENTA'].dt.day_name()
-        heat = work.groupby(['DiaSemana', 'Mes'], as_index=False)['Total_num'].sum()
+        heat = work.groupby(['DiaSemana', 'Mes_P'], as_index=False)['Total_num'].sum()
+        heat['Mes'] = heat['Mes_P'].astype(str)
         orden_dias = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"]
         heat['DiaSemana'] = pd.Categorical(heat['DiaSemana'], categories=orden_dias, ordered=True)
         pivot = heat.pivot(index='DiaSemana', columns='Mes', values='Total_num').fillna(0)
@@ -525,7 +536,6 @@ with tab1:
     # ---------------------- Consulta por período ----------------------
     with tab_r7:
         st.subheader("🔎 Consultar valor por período (Año / Mes / Semana / Día)")
-
         colP0, colP1, colP2 = st.columns([1.2, 1.8, 1.2])
         per = colP0.radio("Período", ["Año", "Mes", "Semana", "Día"], horizontal=True, key="t1_per_radio")
 
@@ -533,20 +543,30 @@ with tab1:
             años = sorted(dfv['Año'].unique().tolist())
             año_sel = colP1.selectbox("Selecciona año", años, index=len(años)-1 if años else 0, key="t1_per_year")
             val = float(dfv.loc[dfv['Año'] == año_sel, 'Total_num'].sum())
+
         elif per == "Mes":
-            meses = sorted(dfv['Mes'].unique().tolist())
-            mes_sel = colP1.selectbox("Selecciona mes (YYYY-MM)", meses, index=len(meses)-1 if meses else 0, key="t1_per_month")
-            val = float(dfv.loc[dfv['Mes'] == mes_sel, 'Total_num'].sum())
+            mesesP = sorted(dfv['Mes_P'].unique().tolist())  # Periods, orden cronológico real
+            mes_sel = colP1.selectbox("Selecciona mes (YYYY-MM)",
+                                      [str(p) for p in mesesP],
+                                      index=len(mesesP)-1 if mesesP else 0, key="t1_per_month")
+            selP = pd.Period(mes_sel, freq='M')
+            val = float(dfv.loc[dfv['FECHA VENTA'].dt.to_period('M') == selP, 'Total_num'].sum())
+
         elif per == "Semana":
-            semanas = sorted(dfv['Semana'].unique().tolist())
-            sem_sel = colP1.selectbox("Selecciona semana (YYYY-Wxx)", semanas, index=len(semanas)-1 if semanas else 0, key="t1_per_week")
-            val = float(dfv.loc[dfv['Semana'] == sem_sel, 'Total_num'].sum())
+            semsP = sorted(dfv['Semana_P'].unique().tolist())
+            sem_sel = colP1.selectbox("Selecciona semana (YYYY-Wxx)",
+                                      [str(p) for p in semsP],
+                                      index=len(semsP)-1 if semsP else 0, key="t1_per_week")
+            selP = pd.Period(sem_sel, freq='W')
+            val = float(dfv.loc[dfv['FECHA VENTA'].dt.to_period('W') == selP, 'Total_num'].sum())
+
         else:  # Día
             dias = sorted(dfv['Día'].unique().tolist())
             dia_sel = colP1.selectbox("Selecciona día (YYYY-MM-DD)", dias, index=len(dias)-1 if dias else 0, key="t1_per_day")
             val = float(dfv.loc[dfv['Día'] == dia_sel, 'Total_num'].sum())
 
         colP2.metric("Valor seleccionado", f"${val:,.0f}")
+        
 # ---------------------------------------------------------------------------------
 # TAB 2: GESTIÓN DE CARTERA (lee Cartera y une COMERCIAL por factura)
 # ---------------------------------------------------------------------------------
