@@ -205,9 +205,11 @@ def ensure_product_numeric_cols(df_prod: pd.DataFrame) -> pd.DataFrame:
 
 def parse_fecha_col(col):
     """
-    Convierte una columna a datetime soportando:
+    Convierte una columna heterogénea a datetime soportando:
     - Textos (dd/mm/yyyy, yyyy-mm-dd, etc.)
     - Seriales de Excel (días desde 1899-12-30)
+
+    Evita TypeError garantizando que al modo 'unit=d' solo entren floats válidos.
     """
     s = pd.Series(col)
 
@@ -217,16 +219,33 @@ def parse_fecha_col(col):
     # 2) Texto (año-primero) como fallback
     dt_yearfirst = pd.to_datetime(s.astype(str), yearfirst=True, errors='coerce')
 
-    # 3) Serial de Excel SOLO en posiciones numéricas válidas
-    nums = pd.to_numeric(s, errors='coerce')
+    # 3) Serial de Excel SOLO para valores numéricos claros
+    def _num_or_nan(x):
+        if pd.isna(x):
+            return np.nan
+        if isinstance(x, (int, float)) and np.isfinite(x):
+            return float(x)
+        xs = str(x).strip()
+        # Acepta enteros/decimales positivos como serial Excel
+        if xs.replace('.', '', 1).isdigit():
+            try:
+                return float(xs)
+            except Exception:
+                return np.nan
+        return np.nan
+
+    nums = s.map(_num_or_nan)
+
     dt_serial = pd.Series(pd.NaT, index=s.index, dtype='datetime64[ns]')
-    mask = nums.notna() & np.isfinite(nums.values)
+    mask = nums.notna()
     if mask.any():
+        # Solo floats válidos hacia to_datetime con unit='d'
         dt_serial.loc[mask] = pd.to_datetime(
-            nums.loc[mask], unit='d', origin='1899-12-30', errors='coerce'
+            nums.loc[mask].astype('float64'),
+            unit='d', origin='1899-12-30', errors='coerce'
         )
 
-    # Combinar con prioridad: texto día-primero -> texto año-primero -> serial Excel
+    # Combina: texto(día-primero) -> texto(año-primero) -> serial Excel
     return dt_dayfirst.combine_first(dt_yearfirst).combine_first(dt_serial)
 
 
